@@ -21,7 +21,7 @@ player.Idled:Connect(function()
 end)
 
 -- ========================================================
--- PUZZLE ENGINE CONFIG & VARIABLES (Fixed)
+-- PUZZLE ENGINE CONFIG & VARIABLES 
 -- ========================================================
 local GENERATOR_NOT_DONE = Color3.fromRGB(255, 255, 0)
 local GENERATOR_DONE = Color3.fromRGB(0, 255, 0)       
@@ -48,6 +48,54 @@ local RING_SIZE = Vector3.new(26, 12, 26)
 local RING_ROTATION_Y = -30
 local ringCFrame = CFrame.new(RING_POSITION) * CFrame.Angles(0, math.rad(RING_ROTATION_Y), 0)
 
+-- drawing the safe zone box so we can actually see where it is
+local ringVisualsFolder = workspace:FindFirstChild("RingVisuals")
+if not ringVisualsFolder then
+	ringVisualsFolder = Instance.new("Folder")
+	ringVisualsFolder.Name = "RingVisuals"
+	ringVisualsFolder.Parent = workspace
+	
+	local boxPart = Instance.new("Part")
+	boxPart.Name = "DetectionBox"
+	boxPart.Size = RING_SIZE
+	boxPart.CFrame = ringCFrame
+	boxPart.Anchored = true
+	boxPart.CanCollide = false
+	boxPart.CanTouch = false
+	boxPart.CanQuery = false
+	boxPart.Transparency = 1
+	boxPart.Parent = ringVisualsFolder
+
+	local selectionBox = Instance.new("SelectionBox")
+	selectionBox.Adornee = boxPart
+	selectionBox.LineThickness = 0
+	selectionBox.Transparency = 1
+	selectionBox.Parent = boxPart
+end
+
+local targetHighlight = Instance.new("Highlight")
+targetHighlight.Name = "TargetHighlight"
+targetHighlight.FillColor = Color3.fromRGB(86, 220, 156) 
+targetHighlight.FillTransparency = 0.5
+targetHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+targetHighlight.OutlineTransparency = 0.2
+targetHighlight.Parent = ringVisualsFolder
+targetHighlight.Adornee = nil
+
+-- master states and target trackers
+local dead = false
+local role = nil
+local running = false
+local isPausedForSafety = false
+local savedRole = nil
+local currentHealTarget = nil 
+local currentArrestTarget = nil
+local isInteracting = false 
+local aimbotTarget = nil
+
+local setStatus = function(txt) end
+local updateFarmBtns = function() end
+
 local function getLatest()
 	local c = player.Character
 	if not c then return nil, nil, nil end
@@ -67,6 +115,15 @@ local function inRing()
 	local relative = ringCFrame:PointToObjectSpace(r.Position)
 	local halfSize = RING_SIZE / 2
 	return math.abs(relative.X) <= halfSize.X and math.abs(relative.Y) <= halfSize.Y and math.abs(relative.Z) <= halfSize.Z
+end
+
+-- PUZZLE SAFE ZONE (Used by Auto Gen)
+local SAFE_ZONE_CENTER = Vector3.new(438.781769, 54.7710724, 109.080544)
+local SAFE_ZONE_RADIUS = 100 
+local function isInSafeZone(pos)
+    return math.abs(pos.X - SAFE_ZONE_CENTER.X) <= SAFE_ZONE_RADIUS and
+           math.abs(pos.Y - SAFE_ZONE_CENTER.Y) <= SAFE_ZONE_RADIUS and
+           math.abs(pos.Z - SAFE_ZONE_CENTER.Z) <= SAFE_ZONE_RADIUS
 end
 
 local function applyHighlight(target, highlightName, fillColor)
@@ -123,55 +180,6 @@ local function cleanupPuzzles()
     destroyVirtualPlatform()
     getgenv().SafeToBypass = false
 end
-
--- drawing the safe zone box so we can actually see where it is
-local ringVisualsFolder = workspace:FindFirstChild("RingVisuals")
-if not ringVisualsFolder then
-	ringVisualsFolder = Instance.new("Folder")
-	ringVisualsFolder.Name = "RingVisuals"
-	ringVisualsFolder.Parent = workspace
-	
-	local boxPart = Instance.new("Part")
-	boxPart.Name = "DetectionBox"
-	boxPart.Size = RING_SIZE
-	boxPart.CFrame = ringCFrame
-	boxPart.Anchored = true
-	boxPart.CanCollide = false
-	boxPart.CanTouch = false
-	boxPart.CanQuery = false
-	boxPart.Transparency = 1
-	boxPart.Parent = ringVisualsFolder
-
-	local selectionBox = Instance.new("SelectionBox")
-	selectionBox.Adornee = boxPart
-	selectionBox.LineThickness = 0
-	selectionBox.Transparency = 1
-	selectionBox.Parent = boxPart
-end
-
--- the neon highlight that glows on whatever player we are currently chasing
-local targetHighlight = Instance.new("Highlight")
-targetHighlight.Name = "TargetHighlight"
-targetHighlight.FillColor = Color3.fromRGB(86, 220, 156) 
-targetHighlight.FillTransparency = 0.5
-targetHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
-targetHighlight.OutlineTransparency = 0.2
-targetHighlight.Parent = ringVisualsFolder
-targetHighlight.Adornee = nil
-
--- master states and target trackers
-local dead = false
-local role = nil
-local running = false
-local isPausedForSafety = false
-local savedRole = nil
-local currentHealTarget = nil 
-local currentArrestTarget = nil
-local isInteracting = false 
-local aimbotTarget = nil
-
-local setStatus = function(txt) end
-local updateFarmBtns = function() end
 
 local function removeDoors()
 	local count = 0
@@ -1027,7 +1035,7 @@ local function notify(titleText, bodyText)
 end
 
 local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "AsylumHubGUI"
+screenGui.Name = "SyntaxHubGUI"
 screenGui.ResetOnSpawn = false
 screenGui.DisplayOrder = 999999999 
 screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
@@ -1047,7 +1055,6 @@ _G.AsylumFarmKill = function()
 	    if getgenv().MyDoorHoldConnection then getgenv().MyDoorHoldConnection:Disconnect() end 
 	    if getgenv().NoclipConnection then getgenv().NoclipConnection:Disconnect() end
 	end)
-	
 	if destroyVirtualPlatform then destroyVirtualPlatform() end
 	
 	if targetHighlight then targetHighlight:Destroy() end
@@ -1319,7 +1326,7 @@ statusLbl.TextSize = 13
 statusLbl.TextXAlignment = Enum.TextXAlignment.Left
 statusLbl.Text = "Status: idle"
 
--- THE NEW PUZZLE AUTO SOLVER PAGE
+-- THE PUZZLE AUTO SOLVER PAGE
 local puzzlesPage = Instance.new("Frame")
 puzzlesPage.Name = "PuzzlesPage"
 puzzlesPage.Parent = pagesHolder
@@ -1352,6 +1359,7 @@ makeCorner(autoBatteryBtn, 8)
 local autoBatteryGrad = makeGradient(autoBatteryBtn, 135)
 local autoBatteryStroke = Instance.new("UIStroke", autoBatteryBtn)
 autoBatteryStroke.Thickness = 1
+
 
 local GREEN_ACTIVE = Color3.fromRGB(38, 155, 65)
 
@@ -1447,6 +1455,7 @@ safeFeederBtn.MouseButton1Click:Connect(function()
 	updateFarmBtns()
 end)
 
+-- The New Puzzle Actions
 autoGenBtn.MouseButton1Click:Connect(function()
     getgenv().AutoGenEnabled = not getgenv().AutoGenEnabled
     updateFarmBtns()
@@ -1939,7 +1948,7 @@ end)
 switchCategory(1); refreshPlayerList(); applyTheme("Emerald")
 
 ---------------------------------------------------------
--- THE PUZZLE ENGINE (Fully Restored & Fixed)
+-- THE PUZZLE ENGINE (Scanner Logic Fully Restored!)
 ---------------------------------------------------------
 local function getPromptPos(prompt, obj)
     if prompt.Parent then
@@ -2046,7 +2055,7 @@ getgenv().MyAutoGenLoop = task.spawn(function()
                 
                 if hrp and hum and hum.Health > 0 then
                     -- If we are in the spawn area / lobby ring, don't do puzzles!
-                    if inRing() then cleanupPuzzles(); getgenv().IsUnderground = false; return end
+                    if isInPuzzleSafeZone(hrp.Position) then cleanupPuzzles(); getgenv().IsUnderground = false; return end
                     
                     if not getgenv().NoclipConnection then
                         getgenv().NoclipConnection = RunService.Stepped:Connect(function()
