@@ -20,14 +20,109 @@ player.Idled:Connect(function()
 	VirtualUser:ClickButton2(Vector2.new())
 end)
 
+-- ========================================================
+-- PUZZLE ENGINE CONFIG & VARIABLES (Fixed)
+-- ========================================================
+local GENERATOR_NOT_DONE = Color3.fromRGB(255, 255, 0)
+local GENERATOR_DONE = Color3.fromRGB(0, 255, 0)       
+local KILLER_FILL = Color3.fromRGB(255, 0, 0)          
+local BATTERY_FILL = Color3.fromRGB(0, 170, 255)       
+local DOOR_FILL = Color3.fromRGB(255, 0, 255)          
+local FUSEBOX_FILL = Color3.fromRGB(255, 128, 0)       
+local OUTLINE_COLOR = Color3.fromRGB(255, 255, 255)    
+local FILL_TRANSPARENCY = 0.5
+local OUTLINE_TRANSPARENCY = 0.1
+
+getgenv().AutoGenEnabled = false
+getgenv().AutoBatteryEnabled = false
+getgenv().IsUnderground = false 
+getgenv().SafeToBypass = false
+getgenv().CurrentPlatform = nil
+
 -- The exact staging coordinate we walk to for the feeder/safe roles
 local DEST = CFrame.new(-10.1279593, 255.272766, -611.696594)
 
--- safe zone ring setup
+-- safe zone ring setup (Used for Lobby detection)
 local RING_POSITION = Vector3.new(-19.12, 256.01, -595.00)
 local RING_SIZE = Vector3.new(26, 12, 26)
 local RING_ROTATION_Y = -30
 local ringCFrame = CFrame.new(RING_POSITION) * CFrame.Angles(0, math.rad(RING_ROTATION_Y), 0)
+
+local function getLatest()
+	local c = player.Character
+	if not c then return nil, nil, nil end
+	local h = c:FindFirstChildOfClass("Humanoid")
+	local r = c:FindFirstChild("HumanoidRootPart")
+	return c, h, r
+end
+
+local function alive()
+	local c, h, r = getLatest()
+	return (c ~= nil and h ~= nil and r ~= nil and h.Health > 0 and c.Parent ~= nil)
+end
+
+local function inRing()
+	local c, h, r = getLatest()
+	if not (c and h and r and h.Health > 0) then return false end
+	local relative = ringCFrame:PointToObjectSpace(r.Position)
+	local halfSize = RING_SIZE / 2
+	return math.abs(relative.X) <= halfSize.X and math.abs(relative.Y) <= halfSize.Y and math.abs(relative.Z) <= halfSize.Z
+end
+
+local function applyHighlight(target, highlightName, fillColor)
+    if target and (target:IsA("Model") or target:IsA("BasePart")) then
+        local highlight = target:FindFirstChild(highlightName)
+        if not highlight then
+            highlight = Instance.new("Highlight")
+            highlight.Name = highlightName
+            highlight.OutlineColor = OUTLINE_COLOR
+            highlight.FillTransparency = FILL_TRANSPARENCY
+            highlight.OutlineTransparency = OUTLINE_TRANSPARENCY
+            highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            highlight.Adornee = target
+            highlight.Parent = target
+        end
+        highlight.FillColor = fillColor
+    end
+end
+
+local function destroyVirtualPlatform()
+    if getgenv().CurrentPlatform then
+        getgenv().CurrentPlatform:Destroy()
+        getgenv().CurrentPlatform = nil
+    end
+end
+
+local function createVirtualPlatform(pos)
+    destroyVirtualPlatform()
+    local plat = Instance.new("Part")
+    plat.Name = "SafeVirtualPlatform"
+    plat.Size = Vector3.new(25, 1, 25) 
+    plat.Position = pos - Vector3.new(0, 3.2, 0)
+    plat.Anchored = true
+    plat.CanCollide = true
+    plat.Transparency = 1 
+    plat.Parent = workspace
+    getgenv().CurrentPlatform = plat
+end
+
+local function cleanupPuzzles()
+    local char = player.Character
+    if char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChild("Humanoid")
+        if hrp then hrp.Anchored = false end
+        if hum then hum.PlatformStand = false end
+        local bv = hrp and hrp:FindFirstChild("SafeHover")
+        if bv then bv:Destroy() end
+    end
+    if getgenv().NoclipConnection then 
+        getgenv().NoclipConnection:Disconnect() 
+        getgenv().NoclipConnection = nil
+    end
+    destroyVirtualPlatform()
+    getgenv().SafeToBypass = false
+end
 
 -- drawing the safe zone box so we can actually see where it is
 local ringVisualsFolder = workspace:FindFirstChild("RingVisuals")
@@ -75,25 +170,9 @@ local currentArrestTarget = nil
 local isInteracting = false 
 local aimbotTarget = nil
 
--- AUTO GEN ENGINE GLOBALS
-getgenv().AutoGenEnabled = false
-getgenv().AutoBatteryEnabled = false
-getgenv().IsUnderground = false 
-getgenv().SafeToBypass = false
-getgenv().CurrentPlatform = nil
-
--- placeholders for ui functions that are built further down
 local setStatus = function(txt) end
 local updateFarmBtns = function() end
 
-local function destroyVirtualPlatform()
-    if getgenv().CurrentPlatform then
-        getgenv().CurrentPlatform:Destroy()
-        getgenv().CurrentPlatform = nil
-    end
-end
-
--- clears out map doors so they don't break our pathfinding routes
 local function removeDoors()
 	local count = 0
 	for _, object in pairs(workspace:GetDescendants()) do
@@ -166,27 +245,6 @@ local Themes = {
 
 local currentThemeName = "Emerald"
 local currentTheme = Themes[currentThemeName]
-
-local function getLatest()
-	local c = player.Character
-	if not c then return nil, nil, nil end
-	local h = c:FindFirstChildOfClass("Humanoid")
-	local r = c:FindFirstChild("HumanoidRootPart")
-	return c, h, r
-end
-
-local function alive()
-	local c, h, r = getLatest()
-	return (c ~= nil and h ~= nil and r ~= nil and h.Health > 0 and c.Parent ~= nil)
-end
-
-local function inRing()
-	local c, h, r = getLatest()
-	if not (c and h and r and h.Health > 0) then return false end
-	local relative = ringCFrame:PointToObjectSpace(r.Position)
-	local halfSize = RING_SIZE / 2
-	return math.abs(relative.X) <= halfSize.X and math.abs(relative.Y) <= halfSize.Y and math.abs(relative.Z) <= halfSize.Z
-end
 
 local function getClosestPlayerInRing()
 	local closest, minDist = nil, math.huge
@@ -981,13 +1039,16 @@ _G.AsylumFarmKill = function()
 	role = nil
 	aimbotTarget = nil
 	
-	if getgenv().MyESPLoop then task.cancel(getgenv().MyESPLoop) end
-	if getgenv().MyBypassLoop then task.cancel(getgenv().MyBypassLoop) end
-	if getgenv().MyStaminaLoop then task.cancel(getgenv().MyStaminaLoop) end
-	if getgenv().MyAutoGenLoop then task.cancel(getgenv().MyAutoGenLoop) end 
-	if getgenv().MyDoorHoldConnection then getgenv().MyDoorHoldConnection:Disconnect() end 
-	if getgenv().NoclipConnection then getgenv().NoclipConnection:Disconnect() end
-	destroyVirtualPlatform()
+	pcall(function()
+	    if getgenv().MyESPLoop then task.cancel(getgenv().MyESPLoop) end
+	    if getgenv().MyBypassLoop then task.cancel(getgenv().MyBypassLoop) end
+	    if getgenv().MyStaminaLoop then task.cancel(getgenv().MyStaminaLoop) end
+	    if getgenv().MyAutoGenLoop then task.cancel(getgenv().MyAutoGenLoop) end 
+	    if getgenv().MyDoorHoldConnection then getgenv().MyDoorHoldConnection:Disconnect() end 
+	    if getgenv().NoclipConnection then getgenv().NoclipConnection:Disconnect() end
+	end)
+	
+	if destroyVirtualPlatform then destroyVirtualPlatform() end
 	
 	if targetHighlight then targetHighlight:Destroy() end
 	if screenGui and screenGui.Parent then screenGui:Destroy() end
@@ -1292,7 +1353,6 @@ local autoBatteryGrad = makeGradient(autoBatteryBtn, 135)
 local autoBatteryStroke = Instance.new("UIStroke", autoBatteryBtn)
 autoBatteryStroke.Thickness = 1
 
-
 local GREEN_ACTIVE = Color3.fromRGB(38, 155, 65)
 
 updateFarmBtns = function()
@@ -1387,12 +1447,11 @@ safeFeederBtn.MouseButton1Click:Connect(function()
 	updateFarmBtns()
 end)
 
--- The New Puzzle Actions
 autoGenBtn.MouseButton1Click:Connect(function()
     getgenv().AutoGenEnabled = not getgenv().AutoGenEnabled
     updateFarmBtns()
     if not getgenv().AutoGenEnabled and not getgenv().AutoBatteryEnabled then
-        cleanup()
+        cleanupPuzzles()
     end
 end)
 
@@ -1400,7 +1459,7 @@ autoBatteryBtn.MouseButton1Click:Connect(function()
     getgenv().AutoBatteryEnabled = not getgenv().AutoBatteryEnabled
     updateFarmBtns()
     if not getgenv().AutoGenEnabled and not getgenv().AutoBatteryEnabled then
-        cleanup()
+        cleanupPuzzles()
     end
 end)
 
@@ -1880,8 +1939,17 @@ end)
 switchCategory(1); refreshPlayerList(); applyTheme("Emerald")
 
 ---------------------------------------------------------
--- THE PUZZLE ENGINE (Auto-Gen & Auto-Battery)
+-- THE PUZZLE ENGINE (Fully Restored & Fixed)
 ---------------------------------------------------------
+local function getPromptPos(prompt, obj)
+    if prompt.Parent then
+        if prompt.Parent:IsA("Attachment") then return prompt.Parent.WorldPosition end
+        if prompt.Parent:IsA("BasePart") then return prompt.Parent.Position end
+    end
+    if obj and (obj:IsA("Model") or obj:IsA("BasePart")) then return obj:GetPivot().Position end
+    return nil
+end
+
 local function scanForPuzzleTarget(charPos)
     local bestPrompt, bestPos, bestDist, bestObject = nil, nil, math.huge, nil
     local targetType = nil
@@ -1891,14 +1959,7 @@ local function scanForPuzzleTarget(charPos)
             if string.find(string.lower(obj.Name), "generator") and not obj:IsA("Folder") then
                 for _, child in ipairs(obj:GetDescendants()) do
                     if child:IsA("ProximityPrompt") and child.Enabled then
-                        local p = child.Parent
-                        local pPos = nil
-                        
-                        if p and p:IsA("BasePart") then pPos = p.Position
-                        elseif p and p:IsA("Attachment") then pPos = p.WorldPosition
-                        elseif obj:IsA("Model") then pPos = obj:GetPivot().Position
-                        elseif obj:IsA("BasePart") then pPos = obj.Position end
-                        
+                        local pPos = getPromptPos(child, obj)
                         if pPos then
                             local dist = (charPos - pPos).Magnitude
                             if dist < bestDist then
@@ -1916,19 +1977,12 @@ local function scanForPuzzleTarget(charPos)
         local c = player.Character
         if c then for _, child in ipairs(c:GetDescendants()) do if string.find(string.lower(child.Name), "battery") then holdingBattery = true break end end end
         
-        local matchName = holdingBattery and "FuseBox" or "Battery"
+        local matchName = holdingBattery and "fusebox" or "battery"
         for _, obj in ipairs(workspace:GetDescendants()) do
-            if string.find(string.lower(obj.Name), string.lower(matchName)) and not obj:IsA("Folder") then
+            if string.find(string.lower(obj.Name), matchName) and not obj:IsA("Folder") then
                 for _, child in ipairs(obj:GetDescendants()) do
                     if child:IsA("ProximityPrompt") and child.Enabled then
-                        local p = child.Parent
-                        local pPos = nil
-                        
-                        if p and p:IsA("BasePart") then pPos = p.Position
-                        elseif p and p:IsA("Attachment") then pPos = p.WorldPosition
-                        elseif obj:IsA("Model") then pPos = obj:GetPivot().Position
-                        elseif obj:IsA("BasePart") then pPos = obj.Position end
-                        
+                        local pPos = getPromptPos(child, obj)
                         if pPos then
                             local dist = (charPos - pPos).Magnitude
                             if dist < bestDist then
@@ -1948,14 +2002,7 @@ local function fireAllPromptsNear(charPos, radius)
     if not fireproximityprompt then return end
     for _, obj in ipairs(workspace:GetDescendants()) do
         if obj:IsA("ProximityPrompt") and obj.Enabled then
-            local p = obj.Parent
-            local pPos = nil
-            
-            if p and p:IsA("BasePart") then pPos = p.Position
-            elseif p and p:IsA("Attachment") then pPos = p.WorldPosition
-            elseif obj.Parent and obj.Parent:IsA("Model") then pPos = obj.Parent:GetPivot().Position
-            elseif obj.Parent and obj.Parent:IsA("BasePart") then pPos = obj.Parent.Position end
-            
+            local pPos = getPromptPos(obj, obj.Parent)
             if pPos and (charPos - pPos).Magnitude <= radius then 
                 obj.MaxActivationDistance = 100 
                 obj.RequiresLineOfSight = false
@@ -1998,7 +2045,9 @@ getgenv().MyAutoGenLoop = task.spawn(function()
                 local hum = char:FindFirstChild("Humanoid")
                 
                 if hrp and hum and hum.Health > 0 then
-                    if isInSafeZone(hrp.Position) then cleanup(); getgenv().IsUnderground = false; return end
+                    -- If we are in the spawn area / lobby ring, don't do puzzles!
+                    if inRing() then cleanupPuzzles(); getgenv().IsUnderground = false; return end
+                    
                     if not getgenv().NoclipConnection then
                         getgenv().NoclipConnection = RunService.Stepped:Connect(function()
                             if player.Character then for _, part in ipairs(player.Character:GetDescendants()) do if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end end end
@@ -2006,7 +2055,7 @@ getgenv().MyAutoGenLoop = task.spawn(function()
                     end
 
                     local nearestPrompt, targetPosition, targetObject, targetType = scanForPuzzleTarget(hrp.Position)
-                    if not nearestPrompt then cleanup(); return end
+                    if not nearestPrompt then cleanupPuzzles(); return end
                     
                     local surfacePos = targetPosition + Vector3.new(0, 3, 0) 
                     local underPos = targetPosition - Vector3.new(0, 15, 0)
@@ -2041,17 +2090,13 @@ getgenv().MyAutoGenLoop = task.spawn(function()
                             task.wait(0.05); timeout = timeout + 1
                         end
                     else
-                        for _, child in ipairs(targetObject:GetDescendants()) do
-                            if child:IsA("ProximityPrompt") and child.Enabled then
-                                child.MaxActivationDistance = 100; child.RequiresLineOfSight = false
-                                if fireproximityprompt then fireproximityprompt(child) end
-                            end
+                        while timeout < 20 do 
+                            nearestPrompt.MaxActivationDistance = 100; nearestPrompt.RequiresLineOfSight = false
+                            if fireproximityprompt then fireproximityprompt(nearestPrompt) end
+                            fireAllPromptsNear(hrp.Position, 50)
+                            task.wait(0.1); timeout = timeout + 1
                         end
-                        task.wait(0.5) 
-                        for _, child in ipairs(targetObject:GetDescendants()) do
-                            if child:IsA("ProximityPrompt") and child.Enabled then if fireproximityprompt then fireproximityprompt(child) end end
-                        end
-                        task.wait(0.5); successfullyOpened = true
+                        successfullyOpened = true
                     end
                     
                     if successfullyOpened then
@@ -2102,14 +2147,18 @@ getgenv().MyESPLoop = task.spawn(function()
         task.wait(1) 
         pcall(function()
             for _, obj in ipairs(workspace:GetDescendants()) do
-                if string.find(obj.Name, "Generator") then
+                local objName = string.lower(obj.Name)
+                if string.find(objName, "generator") and not obj:IsA("Folder") then
                     local isDone = true 
                     for _, child in ipairs(obj:GetDescendants()) do
                         if child:IsA("ProximityPrompt") and child.Enabled == true then isDone = false break end
                     end
                     if isDone then applyHighlight(obj, "GeneratorHighlight", GENERATOR_DONE) else applyHighlight(obj, "GeneratorHighlight", GENERATOR_NOT_DONE) end
-                elseif obj.Name == "Battery" then applyHighlight(obj, "BatteryHighlight", BATTERY_FILL)
-                elseif string.find(obj.Name, "FuseBox") then applyHighlight(obj, "FuseBoxHighlight", FUSEBOX_FILL) end
+                elseif string.find(objName, "battery") and not obj:IsA("Folder") then 
+                    applyHighlight(obj, "BatteryHighlight", BATTERY_FILL)
+                elseif string.find(objName, "fusebox") and not obj:IsA("Folder") then 
+                    applyHighlight(obj, "FuseBoxHighlight", FUSEBOX_FILL) 
+                end
             end
             local killerFolder = workspace:FindFirstChild("KILLER")
             if killerFolder then for _, child in ipairs(killerFolder:GetChildren()) do applyHighlight(child, "KillerHighlight", KILLER_FILL) end end
