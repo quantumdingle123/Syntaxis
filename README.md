@@ -7,7 +7,6 @@ local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local VirtualUser = game:GetService("VirtualUser")
-local PathfindingService = game:GetService("PathfindingService")
 local CoreGui = game:GetService("CoreGui")
 
 local player = Players.LocalPlayer
@@ -21,80 +20,80 @@ player.Idled:Connect(function()
 end)
 
 -- ========================================================
--- PUZZLE ENGINE CONFIG & VARIABLES 
+-- SMART CACHE SYSTEM (LAG FIX)
+-- ========================================================
+local WorldCache = {
+    Prompts = {},
+    Generators = {},
+    Batteries = {},
+    Fuseboxes = {},
+    Doors = {}
+}
+
+local function addToCache(obj)
+    if obj:IsA("ProximityPrompt") then
+        WorldCache.Prompts[obj] = true
+    elseif obj:IsA("Model") or obj:IsA("BasePart") then
+        local name = string.lower(obj.Name)
+        if string.find(name, "door") then WorldCache.Doors[obj] = true
+        elseif string.find(name, "gen") then WorldCache.Generators[obj] = true
+        elseif string.find(name, "batter") then WorldCache.Batteries[obj] = true
+        elseif string.find(name, "fuse") then WorldCache.Fuseboxes[obj] = true
+        end
+    end
+end
+
+local function removeFromCache(obj)
+    WorldCache.Prompts[obj] = nil
+    WorldCache.Doors[obj] = nil
+    WorldCache.Generators[obj] = nil
+    WorldCache.Batteries[obj] = nil
+    WorldCache.Fuseboxes[obj] = nil
+end
+
+-- Safely scan the map once at startup
+task.spawn(function()
+    local descendants = workspace:GetDescendants()
+    for i, obj in ipairs(descendants) do
+        addToCache(obj)
+        if i % 1000 == 0 then task.wait() end -- Yields briefly so your game doesn't freeze on inject
+    end
+    -- Keep cache updated automatically without lagging
+    workspace.DescendantAdded:Connect(addToCache)
+    workspace.DescendantRemoving:Connect(removeFromCache)
+end)
+
+-- ========================================================
+-- PUZZLE & ESP ENGINE CONFIG & VARIABLES 
 -- ========================================================
 local GENERATOR_NOT_DONE = Color3.fromRGB(255, 255, 0)
 local GENERATOR_DONE = Color3.fromRGB(0, 255, 0)       
 local KILLER_FILL = Color3.fromRGB(255, 0, 0)          
 local BATTERY_FILL = Color3.fromRGB(0, 170, 255)       
-local DOOR_FILL = Color3.fromRGB(255, 0, 255)          
 local FUSEBOX_FILL = Color3.fromRGB(255, 128, 0)       
+local DOOR_FILL = Color3.fromRGB(255, 0, 255) 
 local OUTLINE_COLOR = Color3.fromRGB(255, 255, 255)    
 local FILL_TRANSPARENCY = 0.5
 local OUTLINE_TRANSPARENCY = 0.1
 
 getgenv().AutoGenEnabled = false
 getgenv().AutoBatteryEnabled = false
+
+-- ESP State Toggles
+getgenv().ESPToggles = {
+    Killer = false,
+    Generator = false,
+    Battery = false,
+    Fusebox = false,
+    Doors = false
+}
+
 getgenv().IsUnderground = false 
 getgenv().SafeToBypass = false
 getgenv().CurrentPlatform = nil
 
--- The exact staging coordinate we walk to for the feeder/safe roles
-local DEST = CFrame.new(-10.1279593, 255.272766, -611.696594)
-
--- safe zone ring setup (Used for Lobby detection)
-local RING_POSITION = Vector3.new(-19.12, 256.01, -595.00)
-local RING_SIZE = Vector3.new(26, 12, 26)
-local RING_ROTATION_Y = -30
-local ringCFrame = CFrame.new(RING_POSITION) * CFrame.Angles(0, math.rad(RING_ROTATION_Y), 0)
-
--- drawing the safe zone box so we can actually see where it is
-local ringVisualsFolder = workspace:FindFirstChild("RingVisuals")
-if not ringVisualsFolder then
-	ringVisualsFolder = Instance.new("Folder")
-	ringVisualsFolder.Name = "RingVisuals"
-	ringVisualsFolder.Parent = workspace
-	
-	local boxPart = Instance.new("Part")
-	boxPart.Name = "DetectionBox"
-	boxPart.Size = RING_SIZE
-	boxPart.CFrame = ringCFrame
-	boxPart.Anchored = true
-	boxPart.CanCollide = false
-	boxPart.CanTouch = false
-	boxPart.CanQuery = false
-	boxPart.Transparency = 1
-	boxPart.Parent = ringVisualsFolder
-
-	local selectionBox = Instance.new("SelectionBox")
-	selectionBox.Adornee = boxPart
-	selectionBox.LineThickness = 0
-	selectionBox.Transparency = 1
-	selectionBox.Parent = boxPart
-end
-
-local targetHighlight = Instance.new("Highlight")
-targetHighlight.Name = "TargetHighlight"
-targetHighlight.FillColor = Color3.fromRGB(86, 220, 156) 
-targetHighlight.FillTransparency = 0.5
-targetHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
-targetHighlight.OutlineTransparency = 0.2
-targetHighlight.Parent = ringVisualsFolder
-targetHighlight.Adornee = nil
-
--- master states and target trackers
 local dead = false
-local role = nil
-local running = false
-local isPausedForSafety = false
-local savedRole = nil
-local currentHealTarget = nil 
-local currentArrestTarget = nil
-local isInteracting = false 
-local aimbotTarget = nil
-
-local setStatus = function(txt) end
-local updateFarmBtns = function() end
+local ActiveHighlights = {}
 
 local function getLatest()
 	local c = player.Character
@@ -109,37 +108,42 @@ local function alive()
 	return (c ~= nil and h ~= nil and r ~= nil and h.Health > 0 and c.Parent ~= nil)
 end
 
-local function inRing()
-	local c, h, r = getLatest()
-	if not (c and h and r and h.Health > 0) then return false end
-	local relative = ringCFrame:PointToObjectSpace(r.Position)
-	local halfSize = RING_SIZE / 2
-	return math.abs(relative.X) <= halfSize.X and math.abs(relative.Y) <= halfSize.Y and math.abs(relative.Z) <= halfSize.Z
-end
-
 -- PUZZLE SAFE ZONE (Used by Auto Gen)
 local SAFE_ZONE_CENTER = Vector3.new(438.781769, 54.7710724, 109.080544)
 local SAFE_ZONE_RADIUS = 100 
-local function isInSafeZone(pos)
+local function isInPuzzleSafeZone(pos)
     return math.abs(pos.X - SAFE_ZONE_CENTER.X) <= SAFE_ZONE_RADIUS and
            math.abs(pos.Y - SAFE_ZONE_CENTER.Y) <= SAFE_ZONE_RADIUS and
            math.abs(pos.Z - SAFE_ZONE_CENTER.Z) <= SAFE_ZONE_RADIUS
 end
 
 local function applyHighlight(target, highlightName, fillColor)
-    if target and (target:IsA("Model") or target:IsA("BasePart")) then
-        local highlight = target:FindFirstChild(highlightName)
-        if not highlight then
-            highlight = Instance.new("Highlight")
-            highlight.Name = highlightName
-            highlight.OutlineColor = OUTLINE_COLOR
-            highlight.FillTransparency = FILL_TRANSPARENCY
-            highlight.OutlineTransparency = OUTLINE_TRANSPARENCY
-            highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            highlight.Adornee = target
-            highlight.Parent = target
+    if not target then return end
+    local hl = ActiveHighlights[target]
+    if not hl or not hl.Parent then
+        hl = Instance.new("Highlight")
+        hl.Name = highlightName
+        hl.OutlineColor = OUTLINE_COLOR
+        hl.FillTransparency = FILL_TRANSPARENCY
+        hl.OutlineTransparency = OUTLINE_TRANSPARENCY
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Adornee = target
+        
+        -- Try to parent to CoreGui for safety, fallback to target
+        local success = pcall(function() hl.Parent = CoreGui end)
+        if not success then hl.Parent = target end
+        
+        ActiveHighlights[target] = hl
+    end
+    hl.FillColor = fillColor
+    hl.Enabled = true
+end
+
+local function clearHighlights(hName)
+    for target, hl in pairs(ActiveHighlights) do
+        if hl and hl.Name == hName then
+            hl.Enabled = false
         end
-        highlight.FillColor = fillColor
     end
 end
 
@@ -181,34 +185,8 @@ local function cleanupPuzzles()
     getgenv().SafeToBypass = false
 end
 
-local function removeDoors()
-	local count = 0
-	for _, object in pairs(workspace:GetDescendants()) do
-		if string.find(string.lower(object.Name), "door") then
-			pcall(function() object:Destroy() end)
-			count += 1
-		end
-	end
-end
-
--- all 7 stunning ui themes
+-- All Stunning UI Themes
 local Themes = {
-	Dark = {
-		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 18, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(28, 28, 36)), ColorSequenceKeypoint.new(1, Color3.fromRGB(38, 38, 48))},
-		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(24, 24, 32)), ColorSequenceKeypoint.new(1, Color3.fromRGB(40, 40, 52))},
-		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 42, 56)), ColorSequenceKeypoint.new(1, Color3.fromRGB(58, 58, 74))},
-		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 60, 78)), ColorSequenceKeypoint.new(1, Color3.fromRGB(84, 84, 104))},
-		Accent = Color3.fromRGB(120, 125, 145), Accent2 = Color3.fromRGB(170, 175, 195),
-		Text = Color3.fromRGB(240, 240, 245), SubText = Color3.fromRGB(180, 180, 195), Stroke = Color3.fromRGB(85, 85, 105), Glow = Color3.fromRGB(130, 135, 160)
-	},
-	Red = {
-		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(36, 12, 18)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(54, 18, 26)), ColorSequenceKeypoint.new(1, Color3.fromRGB(78, 28, 38))},
-		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(50, 15, 24)), ColorSequenceKeypoint.new(1, Color3.fromRGB(86, 28, 40))},
-		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(94, 32, 44)), ColorSequenceKeypoint.new(1, Color3.fromRGB(128, 44, 58))},
-		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(122, 42, 56)), ColorSequenceKeypoint.new(1, Color3.fromRGB(168, 58, 74))},
-		Accent = Color3.fromRGB(220, 78, 98), Accent2 = Color3.fromRGB(255, 130, 145),
-		Text = Color3.fromRGB(255, 238, 240), SubText = Color3.fromRGB(232, 185, 192), Stroke = Color3.fromRGB(160, 68, 82), Glow = Color3.fromRGB(255, 95, 115)
-	},
 	Sapphire = {
 		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(10, 24, 50)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 40, 78)), ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 58, 108))},
 		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 36, 70)), ColorSequenceKeypoint.new(1, Color3.fromRGB(34, 62, 110))},
@@ -216,6 +194,38 @@ local Themes = {
 		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 110, 176)), ColorSequenceKeypoint.new(1, Color3.fromRGB(86, 142, 215))},
 		Accent = Color3.fromRGB(92, 170, 255), Accent2 = Color3.fromRGB(160, 215, 255),
 		Text = Color3.fromRGB(240, 248, 255), SubText = Color3.fromRGB(180, 210, 235), Stroke = Color3.fromRGB(88, 132, 185), Glow = Color3.fromRGB(96, 180, 255)
+	},
+	Ruby = {
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 5, 5)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(45, 8, 8)), ColorSequenceKeypoint.new(1, Color3.fromRGB(60, 10, 10))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(40, 8, 8)), ColorSequenceKeypoint.new(1, Color3.fromRGB(70, 12, 12))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(80, 15, 15)), ColorSequenceKeypoint.new(1, Color3.fromRGB(110, 20, 20))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(100, 20, 20)), ColorSequenceKeypoint.new(1, Color3.fromRGB(140, 30, 30))},
+		Accent = Color3.fromRGB(220, 20, 40), Accent2 = Color3.fromRGB(255, 60, 80),
+		Text = Color3.fromRGB(255, 230, 230), SubText = Color3.fromRGB(200, 150, 150), Stroke = Color3.fromRGB(140, 40, 40), Glow = Color3.fromRGB(255, 30, 50)
+	},
+	Void = {
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(12, 12, 18)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(20, 15, 28)), ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 20, 40))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 15, 25)), ColorSequenceKeypoint.new(1, Color3.fromRGB(30, 22, 45))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(45, 30, 65)), ColorSequenceKeypoint.new(1, Color3.fromRGB(65, 40, 90))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 40, 85)), ColorSequenceKeypoint.new(1, Color3.fromRGB(85, 55, 120))},
+		Accent = Color3.fromRGB(150, 80, 255), Accent2 = Color3.fromRGB(200, 120, 255),
+		Text = Color3.fromRGB(240, 240, 255), SubText = Color3.fromRGB(180, 160, 200), Stroke = Color3.fromRGB(90, 60, 130), Glow = Color3.fromRGB(160, 90, 255)
+	},
+	Ocean = {
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(5, 25, 30)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(10, 40, 45)), ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 60, 65))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(8, 35, 40)), ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 55, 60))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(20, 80, 90)), ColorSequenceKeypoint.new(1, Color3.fromRGB(30, 110, 120))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 100, 110)), ColorSequenceKeypoint.new(1, Color3.fromRGB(40, 135, 150))},
+		Accent = Color3.fromRGB(40, 200, 220), Accent2 = Color3.fromRGB(100, 240, 255),
+		Text = Color3.fromRGB(220, 250, 255), SubText = Color3.fromRGB(160, 210, 220), Stroke = Color3.fromRGB(40, 140, 150), Glow = Color3.fromRGB(60, 220, 240)
+	},
+	Dark = {
+		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 18, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(28, 28, 36)), ColorSequenceKeypoint.new(1, Color3.fromRGB(38, 38, 48))},
+		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(24, 24, 32)), ColorSequenceKeypoint.new(1, Color3.fromRGB(40, 40, 52))},
+		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 42, 56)), ColorSequenceKeypoint.new(1, Color3.fromRGB(58, 58, 74))},
+		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 60, 78)), ColorSequenceKeypoint.new(1, Color3.fromRGB(84, 84, 104))},
+		Accent = Color3.fromRGB(120, 125, 145), Accent2 = Color3.fromRGB(170, 175, 195),
+		Text = Color3.fromRGB(240, 240, 245), SubText = Color3.fromRGB(180, 180, 195), Stroke = Color3.fromRGB(85, 85, 105), Glow = Color3.fromRGB(130, 135, 160)
 	},
 	Emerald = {
 		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(10, 32, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 52, 38)), ColorSequenceKeypoint.new(1, Color3.fromRGB(26, 76, 54))},
@@ -225,14 +235,6 @@ local Themes = {
 		Accent = Color3.fromRGB(86, 220, 156), Accent2 = Color3.fromRGB(152, 255, 204),
 		Text = Color3.fromRGB(236, 255, 245), SubText = Color3.fromRGB(176, 220, 196), Stroke = Color3.fromRGB(72, 150, 112), Glow = Color3.fromRGB(100, 255, 180)
 	},
-	Amethyst = {
-		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(28, 14, 42)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(44, 24, 66)), ColorSequenceKeypoint.new(1, Color3.fromRGB(62, 34, 94))},
-		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 20, 62)), ColorSequenceKeypoint.new(1, Color3.fromRGB(68, 32, 98))},
-		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(82, 42, 120)), ColorSequenceKeypoint.new(1, Color3.fromRGB(108, 58, 154))},
-		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(122, 72, 176)), ColorSequenceKeypoint.new(1, Color3.fromRGB(152, 102, 212))},
-		Accent = Color3.fromRGB(190, 110, 255), Accent2 = Color3.fromRGB(225, 180, 255),
-		Text = Color3.fromRGB(249, 242, 255), SubText = Color3.fromRGB(212, 188, 230), Stroke = Color3.fromRGB(134, 92, 180), Glow = Color3.fromRGB(205, 120, 255)
-	},
 	Gold = {
 		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(44, 30, 10)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(66, 46, 16)), ColorSequenceKeypoint.new(1, Color3.fromRGB(92, 68, 24))},
 		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(68, 46, 14)), ColorSequenceKeypoint.new(1, Color3.fromRGB(110, 78, 26))},
@@ -240,673 +242,18 @@ local Themes = {
 		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(182, 140, 52)), ColorSequenceKeypoint.new(1, Color3.fromRGB(224, 178, 74))},
 		Accent = Color3.fromRGB(255, 204, 82), Accent2 = Color3.fromRGB(255, 232, 145),
 		Text = Color3.fromRGB(255, 248, 232), SubText = Color3.fromRGB(228, 210, 170), Stroke = Color3.fromRGB(190, 148, 62), Glow = Color3.fromRGB(255, 214, 92)
-	},
-	Rose = {
-		Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(46, 18, 28)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(70, 28, 44)), ColorSequenceKeypoint.new(1, Color3.fromRGB(100, 42, 62))},
-		Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(62, 24, 38)), ColorSequenceKeypoint.new(1, Color3.fromRGB(98, 40, 58))},
-		Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(120, 52, 76)), ColorSequenceKeypoint.new(1, Color3.fromRGB(162, 70, 104))},
-		ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(186, 90, 124)), ColorSequenceKeypoint.new(1, Color3.fromRGB(224, 118, 154))},
-		Accent = Color3.fromRGB(255, 126, 170), Accent2 = Color3.fromRGB(255, 188, 212),
-		Text = Color3.fromRGB(255, 242, 247), SubText = Color3.fromRGB(234, 190, 205), Stroke = Color3.fromRGB(190, 96, 132), Glow = Color3.fromRGB(255, 135, 180)
 	}
 }
 
-local currentThemeName = "Emerald"
+local currentThemeName = "Sapphire"
 local currentTheme = Themes[currentThemeName]
 
-local function getClosestPlayerInRing()
-	local closest, minDist = nil, math.huge
-	local c, h, r = getLatest()
-	if not r then return nil end
-
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= player and p.Character then
-			local th = p.Character:FindFirstChildOfClass("Humanoid")
-			local tr = p.Character:FindFirstChild("HumanoidRootPart")
-			
-			if th and tr and th.Health > 0 then
-				local relative = ringCFrame:PointToObjectSpace(tr.Position)
-				local halfSize = RING_SIZE / 2
-				local pInRing = math.abs(relative.X) <= halfSize.X and math.abs(relative.Y) <= halfSize.Y and math.abs(relative.Z) <= halfSize.Z
-				
-				if pInRing then
-					local dist = (r.Position - tr.Position).Magnitude
-					if dist < minDist then minDist = dist; closest = p end
-				end
-			end
-		end
-	end
-	return closest
-end
-
-local function isHostile(targetChar)
-	local pGui = player:FindFirstChild("PlayerGui")
-	local overheadGuis = pGui and pGui:FindFirstChild("OverheadGuis")
-	if not overheadGuis then return false end
-	
-	for _, gui in ipairs(overheadGuis:GetChildren()) do
-		if gui:IsA("BillboardGui") and gui.Adornee and gui.Adornee:IsDescendantOf(targetChar) then
-			local holder = gui:FindFirstChild("Holder")
-			local hostileTag = holder and holder:FindFirstChild("Hostile")
-			
-			if hostileTag and hostileTag:IsA("TextLabel") and hostileTag.Visible then
-				if string.find(string.lower(hostileTag.Text), "hostile") then return true end
-			end
-		end
-	end
-	return false
-end
-
-local function getClosestHurtPlayer()
-	local closest, minDist = nil, math.huge
-	local c, h, r = getLatest()
-	if not r then return nil end
-
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= player and p.Character then
-			local th = p.Character:FindFirstChildOfClass("Humanoid")
-			local tr = p.Character:FindFirstChild("HumanoidRootPart")
-			
-			if th and tr and th.Health > 0 and th.Health < th.MaxHealth then
-				local dist = (r.Position - tr.Position).Magnitude
-				if dist < minDist then minDist = dist; closest = p end
-			end
-		end
-	end
-	return closest
-end
-
-local function getClosestHostilePlayer()
-	local closest, minDist = nil, math.huge
-	local c, h, r = getLatest()
-	if not r then return nil end
-
-	for _, p in ipairs(Players:GetPlayers()) do
-		if p ~= player and p.Character then
-			local th = p.Character:FindFirstChildOfClass("Humanoid")
-			local tr = p.Character:FindFirstChild("HumanoidRootPart")
-			
-			if th and tr and th.Health > 0 and isHostile(p.Character) then
-				local dist = (r.Position - tr.Position).Magnitude
-				if dist < minDist then minDist = dist; closest = p end
-			end
-		end
-	end
-	return closest
-end
-
-local function isToolReady(toolName)
-	local bp = player:FindFirstChild("Backpack")
-	local c = player.Character
-	
-	local searchName = toolName
-	if toolName == "Box" then
-		if (bp and bp:FindFirstChild("Arrest")) or (c and c:FindFirstChild("Arrest")) then
-			searchName = "Arrest"
-		end
-	end
-	
-	local tool = (c and c:FindFirstChild(searchName)) or (bp and bp:FindFirstChild(searchName))
-	
-	if tool then
-		local readyAttr = tool:GetAttribute("Ready")
-		if readyAttr ~= nil then
-			return readyAttr == true
-		end
-		return true 
-	end
-	return false
-end
-
-task.spawn(function()
-	while not dead do
-		task.wait(0.1)
-		if running and alive() and (role == "SAFE FARMER" or role == "SAFE FEEDER") then
-			local c = player.Character
-			if c and inRing() then
-				local target = getClosestPlayerInRing()
-				local tool = c:FindFirstChildOfClass("Tool")
-				
-				if target and target.Character then
-					local targetHum = target.Character:FindFirstChild("Humanoid")
-					if targetHum and targetHum.Health > 0 then
-						local hpPercent = targetHum.Health / targetHum.MaxHealth
-						
-						if role == "SAFE FARMER" then
-							if tool then tool:Activate() end
-							VirtualUser:ClickButton1(Vector2.new())
-							
-						elseif role == "SAFE FEEDER" then
-							if hpPercent <= 0.30 then
-								if tool then tool:Deactivate() end
-							else
-								if tool then tool:Activate() end
-								VirtualUser:ClickButton1(Vector2.new())
-							end
-						end
-					else
-						if tool then tool:Deactivate() end
-					end
-				else
-					if tool then tool:Deactivate() end
-				end
-			end
-		end
-	end
-end)
-
-RunService.RenderStepped:Connect(function()
-	if aimbotTarget and aimbotTarget.Parent and alive() then
-		local c, h, r = getLatest()
-		local targetHrp = aimbotTarget:FindFirstChild("HumanoidRootPart")
-		
-		if r and targetHrp then
-			camera.CFrame = CFrame.lookAt(camera.CFrame.Position, targetHrp.Position)
-			r.CFrame = CFrame.lookAt(r.Position, Vector3.new(targetHrp.Position.X, r.Position.Y, targetHrp.Position.Z))
-		end
-	end
-end)
-
-task.spawn(function()
-	while not dead do
-		task.wait(1.5) 
-		for _, obj in pairs(workspace:GetDescendants()) do
-			if obj:IsA("ProximityPrompt") then
-				if obj.ActionText == "Box" or obj.Name == "Box" or obj.ObjectText == "Box" or obj.ActionText == "Arrest" or obj.ActionText == "Heal" then
-					obj.MaxActivationDistance = 30
-				else
-					obj.MaxActivationDistance = 10
-				end
-				obj.RequiresLineOfSight = false
-			end
-		end
-	end
-end)
-
-local pathParams = { AgentRadius = 2, AgentHeight = 5, AgentCanJump = true, WaypointSpacing = 4 }
-local path = PathfindingService:CreatePath(pathParams)
-
-local visualsFolder = workspace:FindFirstChild("PathVisuals")
-if not visualsFolder then
-	visualsFolder = Instance.new("Folder")
-	visualsFolder.Name = "PathVisuals"
-	visualsFolder.Parent = workspace
-end
-
-local partPool = {}
-local jointPool = {}
-
-local function getFloorPosition(basePos)
-	local params = RaycastParams.new()
-	params.FilterType = Enum.RaycastFilterType.Exclude
-	local c = player.Character
-	params.FilterDescendantsInstances = c and {c, visualsFolder, ringVisualsFolder} or {visualsFolder, ringVisualsFolder}
-	
-	local result = workspace:Raycast(basePos + Vector3.new(0, 3, 0), Vector3.new(0, -15, 0), params)
-	if result then return result.Position + Vector3.new(0, 0.2, 0) end
-	return basePos - Vector3.new(0, 2, 0) 
-end
-
-local function drawWaypoints(waypoints)
-	if not visualsFolder or not visualsFolder.Parent then
-		visualsFolder = Instance.new("Folder")
-		visualsFolder.Name = "PathVisuals"
-		visualsFolder.Parent = workspace
-	end
-
-	local maxWpToDraw = #waypoints 
-	local floorPositions = {}
-	
-	for i = 1, maxWpToDraw do
-		floorPositions[i] = getFloorPosition(waypoints[i].Position)
-		local pos = floorPositions[i]
-		local joint = jointPool[i]
-		
-		if not joint or not joint.Parent then
-			if not joint then
-				joint = Instance.new("Part"); joint.Shape = Enum.PartType.Ball; joint.Anchored = true; joint.CanCollide = false; joint.CanQuery = false; joint.Material = Enum.Material.Neon; jointPool[i] = joint
-			end
-			joint.Parent = visualsFolder
-		end
-		
-		joint.Size = Vector3.new(1.2, 1.2, 1.2); joint.Position = pos
-		if waypoints[i].Action == Enum.PathWaypointAction.Jump then joint.Color = Color3.fromRGB(255, 100, 100) else joint.Color = currentTheme.Accent end
-		
-		if i < maxWpToDraw then
-			if not floorPositions[i+1] then floorPositions[i+1] = getFloorPosition(waypoints[i+1].Position) end
-			local nextPos = floorPositions[i+1]
-			local dist = (pos - nextPos).Magnitude
-			local line = partPool[i]
-			
-			if not line or not line.Parent then
-				if not line then
-					line = Instance.new("Part"); line.Shape = Enum.PartType.Cylinder; line.Anchored = true; line.CanCollide = false; line.CanQuery = false; line.Material = Enum.Material.Neon; partPool[i] = line
-				end
-				line.Parent = visualsFolder
-			end
-			
-			line.Size = Vector3.new(dist, 0.8, 0.8) 
-			line.CFrame = CFrame.lookAt(pos, nextPos) * CFrame.new(0, 0, -dist/2) * CFrame.Angles(0, math.rad(90), 0)
-			
-			if waypoints[i+1].Action == Enum.PathWaypointAction.Jump then line.Color = Color3.fromRGB(255, 100, 100) else line.Color = currentTheme.Accent end
-		end
-	end
-	for i = maxWpToDraw + 1, #jointPool do if jointPool[i] then jointPool[i].Parent = nil end end
-	for i = maxWpToDraw, #partPool do if partPool[i] then partPool[i].Parent = nil end end
-end
-
-local currentWaypoints = {}
-local currentWpIndex = 1
-local isNoclipping = false
-
-RunService.Stepped:Connect(function()
-	if alive() then
-		local c, h, r = getLatest()
-		if isNoclipping and c then
-			for _, v in ipairs(c:GetDescendants()) do
-				if v:IsA("BasePart") then v.CanCollide = false end
-			end
-		end
-	end
-end)
-
-local lastComputedTargetPos = nil
-local forceRecalculateTimer = 0
-
-task.spawn(function()
-	while not dead do
-		task.wait(0.2) 
-		if running and alive() and not isPausedForSafety then
-			local c, h, r = getLatest()
-			if r then
-				local targetPos = DEST.Position
-				local shouldPath = false
-				
-				if role == "HEALER" then
-					currentHealTarget = getClosestHurtPlayer()
-					if currentHealTarget and currentHealTarget.Character then
-						targetHighlight.Adornee = currentHealTarget.Character
-						local tr = currentHealTarget.Character:FindFirstChild("HumanoidRootPart")
-						if tr then targetPos = tr.Position; shouldPath = true end
-					else
-						targetHighlight.Adornee = nil
-					end
-				elseif role == "ARREST" then
-					currentArrestTarget = getClosestHostilePlayer()
-					if currentArrestTarget and currentArrestTarget.Character then
-						targetHighlight.Adornee = currentArrestTarget.Character
-						local tr = currentArrestTarget.Character:FindFirstChild("HumanoidRootPart")
-						if tr then targetPos = tr.Position; shouldPath = true end
-					else
-						targetHighlight.Adornee = nil
-					end
-				elseif role == "SAFE FARMER" or role == "SAFE FEEDER" then
-					if not inRing() then
-						targetPos = DEST.Position
-						shouldPath = true
-						targetHighlight.Adornee = nil
-						aimbotTarget = nil 
-					else
-						shouldPath = false 
-						local target = getClosestPlayerInRing()
-						if target and target.Character then
-							targetHighlight.Adornee = target.Character
-							aimbotTarget = target.Character 
-						else
-							targetHighlight.Adornee = nil
-							aimbotTarget = nil
-						end
-					end
-				else
-					targetHighlight.Adornee = nil
-					if not inRing() then shouldPath = true end
-				end
-				
-				if shouldPath and targetPos then
-					forceRecalculateTimer += 0.2
-					if not lastComputedTargetPos or (lastComputedTargetPos - targetPos).Magnitude > 2 or forceRecalculateTimer >= 0.8 or #currentWaypoints == 0 then
-						forceRecalculateTimer = 0 
-						local success = pcall(function() path:ComputeAsync(r.Position, targetPos) end)
-						if success and path.Status == Enum.PathStatus.Success then
-							local wps = path:GetWaypoints()
-							if #wps > 1 then
-								lastComputedTargetPos = targetPos; currentWaypoints = wps; currentWpIndex = 2; drawWaypoints(currentWaypoints)
-							end
-						else
-							lastComputedTargetPos = nil
-						end
-					end
-				end
-			end
-		end
-	end
-end)
-
-task.spawn(function()
-	while not dead do
-		task.wait(0.05) 
-		if running and alive() and not isPausedForSafety then
-			local c, h, r = getLatest()
-			if h and r then
-				local haltMovement = false
-				local directWalkTarget = nil
-				
-				if role == "HEALER" and currentHealTarget and currentHealTarget.Character then
-					local tr = currentHealTarget.Character:FindFirstChild("HumanoidRootPart")
-					if tr and (r.Position - tr.Position).Magnitude <= 2.5 then haltMovement = true end
-				elseif role == "ARREST" and currentArrestTarget and currentArrestTarget.Character then
-					local tr = currentArrestTarget.Character:FindFirstChild("HumanoidRootPart")
-					if tr and (r.Position - tr.Position).Magnitude <= 2.5 then haltMovement = true end
-				elseif role == "FARMER" or role == "FEEDER" then
-					local distToDest = (r.Position - DEST.Position).Magnitude
-					if distToDest <= 3.5 or inRing() then haltMovement = true end
-				elseif role == "SAFE FARMER" or role == "SAFE FEEDER" then
-					if not inRing() then
-						local distToDest = (r.Position - DEST.Position).Magnitude
-						if distToDest <= 3.5 then haltMovement = true end
-					else
-						local target = getClosestPlayerInRing()
-						if target and target.Character then
-							local tr = target.Character:FindFirstChild("HumanoidRootPart")
-							if tr then directWalkTarget = tr.Position end
-						end
-					end
-				end
-				
-				if haltMovement then pcall(function() h:MoveTo(r.Position) end); continue end
-				
-				if directWalkTarget then
-					pcall(function() h:MoveTo(directWalkTarget) end)
-					local params = RaycastParams.new(); params.FilterType = Enum.RaycastFilterType.Exclude; params.FilterDescendantsInstances = {c, visualsFolder, ringVisualsFolder}
-					local frontHit = workspace:Raycast(r.Position, r.CFrame.LookVector * 3.5, params)
-					if frontHit and frontHit.Instance and frontHit.Instance.CanCollide then h.Jump = true end
-					continue
-				end
-				
-				local params = RaycastParams.new(); params.FilterType = Enum.RaycastFilterType.Exclude; params.FilterDescendantsInstances = {c, visualsFolder, ringVisualsFolder}
-				local frontHit = workspace:Raycast(r.Position, r.CFrame.LookVector * 3.5, params)
-				if frontHit and frontHit.Instance and frontHit.Instance.CanCollide then h.Jump = true end
-				
-				if #currentWaypoints > 0 and currentWpIndex <= #currentWaypoints then
-					local wp = currentWaypoints[currentWpIndex]
-					if wp.Action == Enum.PathWaypointAction.Jump then h.Jump = true end
-					pcall(function() h:MoveTo(wp.Position) end)
-					local dist = (r.Position * Vector3.new(1,0,1) - wp.Position * Vector3.new(1,0,1)).Magnitude
-					if dist < 4.0 then currentWpIndex += 1 end
-				end
-			end
-		end
-	end
-end)
-
-local checkPos = Vector3.new()
-local timeStuck = 0
-task.spawn(function()
-	while not dead do
-		task.wait(1)
-		if running and alive() and not isPausedForSafety then
-			local c, h, r = getLatest()
-			if r then
-				local destPos = DEST.Position
-				local isPathingToTarget = false
-				
-				if role == "FARMER" or role == "FEEDER" then
-					local distToDest = (r.Position - DEST.Position).Magnitude
-					if inRing() or distToDest <= 3.5 then continue end
-				elseif role == "HEALER" and currentHealTarget and currentHealTarget.Character then
-					local tr = currentHealTarget.Character:FindFirstChild("HumanoidRootPart")
-					if tr then destPos = tr.Position; isPathingToTarget = true end
-				elseif role == "ARREST" and currentArrestTarget and currentArrestTarget.Character then
-					local tr = currentArrestTarget.Character:FindFirstChild("HumanoidRootPart")
-					if tr then destPos = tr.Position; isPathingToTarget = true end
-				elseif (role == "SAFE FARMER" or role == "SAFE FEEDER") then
-					if inRing() then
-						local target = getClosestPlayerInRing()
-						if target and target.Character then
-							local tr = target.Character:FindFirstChild("HumanoidRootPart")
-							if tr then destPos = tr.Position; isPathingToTarget = true end
-						end
-					else
-						local distToDest = (r.Position - DEST.Position).Magnitude
-						if distToDest <= 3.5 then continue end
-					end
-				end
-				
-				if (role == "HEALER" or role == "ARREST") and not isPathingToTarget then checkPos = r.Position; timeStuck = 0; continue end
-				
-				local distMoved = (r.Position * Vector3.new(1,0,1) - checkPos * Vector3.new(1,0,1)).Magnitude
-				local distToDest = (r.Position * Vector3.new(1,0,1) - destPos * Vector3.new(1,0,1)).Magnitude
-				
-				if distToDest > 6 then
-					if distMoved < 2 then
-						timeStuck += 1
-						if timeStuck >= 4 then
-							setStatus("stuck! popping noclip and pushing forward...")
-							h.Jump = true; isNoclipping = true
-							pcall(function() r.CFrame = r.CFrame + (r.CFrame.LookVector * 4) end)
-							task.delay(1.5, function() isNoclipping = false end)
-							timeStuck = 0; checkPos = r.Position
-						end
-					else
-						timeStuck = 0; checkPos = r.Position
-					end
-				end
-			end
-		end
-	end
-end)
-
-local function equipToolTarget(toolName)
-	local char = player.Character
-	if not char then return false end
-	local hum = char:FindFirstChild("Humanoid")
-	local bp = player:FindFirstChild("Backpack")
-	
-	local searchName = toolName
-	if toolName == "Box" then
-		if (bp and bp:FindFirstChild("Arrest")) or (char:FindFirstChild("Arrest")) then searchName = "Arrest" end
-	end
-	
-	if char:FindFirstChild(searchName) then return true, searchName end
-	if bp and hum then
-		local tool = bp:FindFirstChild(searchName)
-		if tool then hum:EquipTool(tool); return true, searchName end
-	end
-	return false, toolName
-end
-
-local function holdInteraction(targetChar, toolName, remoteName, targetPlayer)
-	local char = player.Character
-	if not char or not targetChar then return false end
-	
-	local success, actualToolName = equipToolTarget(toolName)
-	if success then
-		task.wait(0.25)
-		local tool = char:FindFirstChild(actualToolName)
-		local prompt = nil
-		
-		for _, obj in pairs(targetChar:GetDescendants()) do
-			if obj:IsA("ProximityPrompt") then prompt = obj; break end
-		end
-		
-		local remote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild(remoteName)
-		local startRemote = ReplicatedStorage:FindFirstChild("Remote") and ReplicatedStorage.Remote:FindFirstChild("StartHeal")
-		
-		local startTime = tick()
-		local maxFailSafe = tick() 
-		local remoteFired = false
-		
-		if prompt then prompt.MaxActivationDistance = 25; prompt.RequiresLineOfSight = false; pcall(function() prompt:InputHoldBegin() end) end
-		if tool then pcall(function() tool:Activate() end) end
-
-		while isToolReady(actualToolName) and targetChar.Parent and alive() do
-			local tr = targetChar:FindFirstChild("HumanoidRootPart")
-			local hrp = char:FindFirstChild("HumanoidRootPart")
-			
-			if not tr or not hrp or (hrp.Position - tr.Position).Magnitude > 20 then break end
-			if tick() - maxFailSafe > 8 then break end 
-			
-			if not remoteFired and (tick() - startTime >= 3) then
-				remoteFired = true
-				if toolName ~= "Box" and startRemote and targetPlayer then task.spawn(function() pcall(function() startRemote:FireServer(targetPlayer) end) end) end
-				if remote and targetPlayer then task.spawn(function() pcall(function() remote:FireServer(targetPlayer) end) end) end
-			end
-			task.wait(0.1)
-		end
-		
-		if prompt then pcall(function() prompt:InputHoldEnd() end) end
-		if tool then pcall(function() tool:Deactivate() end) end
-		return true
-	end
-	return false
-end
-
-local function performHealSequence(targetPlayer)
-	local char = player.Character
-	if not char or not targetPlayer.Character then return end
-	aimbotTarget = targetPlayer.Character
-	
-	if isToolReady("Medical Kit") then holdInteraction(targetPlayer.Character, "Medical Kit", "AttemptHeal", targetPlayer)
-	elseif isToolReady("Quick-Fix") then holdInteraction(targetPlayer.Character, "Quick-Fix", "AttemptHeal", targetPlayer)
-	else task.wait(0.2) end
-
-	aimbotTarget = nil
-	local humanoid = char:FindFirstChildOfClass("Humanoid")
-	if humanoid then humanoid:UnequipTools() end
-end
-
-local function performArrestSequence(targetPlayer)
-	local c, h = getLatest()
-	if not c or not targetPlayer.Character then return end
-	aimbotTarget = targetPlayer.Character
-	
-	if isToolReady("Box") then holdInteraction(targetPlayer.Character, "Box", "Detainment", targetPlayer) end
-	aimbotTarget = nil
-	if h then h:UnequipTools() end
-end
-
-task.spawn(function()
-	while not dead do
-		task.wait(0.1) 
-		pcall(function()
-			if running then
-				if not alive() then
-					setStatus("waiting to respawn...")
-					currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
-					drawWaypoints({}) 
-					task.wait(1.5) 
-					return 
-				end
-
-				if role == "FARMER" then
-					local distToDest = 999
-					local c, h, r = getLatest()
-					if r then distToDest = (r.Position - DEST.Position).Magnitude end
-					
-					if inRing() then
-						if #currentWaypoints > 0 then currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1 end
-						setStatus("in ring — idling")
-					elseif distToDest <= 3.5 then
-						if #currentWaypoints > 0 then currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1 end
-						setStatus("at destination — waiting")
-					else setStatus("walking to safe zone...") end
-				elseif role == "FEEDER" then
-					local distToDest = 999
-					local c, h, r = getLatest()
-					if r then distToDest = (r.Position - DEST.Position).Magnitude end
-					
-					if inRing() then
-						currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
-						setStatus("resetting character...")
-						if h then h.Health = 0 end
-						task.wait(1)
-					elseif distToDest <= 3.5 then
-						currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
-						setStatus("waiting to be farmed...")
-					else setStatus("walking to destination...") end
-				elseif role == "SAFE FARMER" or role == "SAFE FEEDER" then
-					if inRing() then
-						local target = getClosestPlayerInRing()
-						if target then setStatus("In Ring: Combat Engaged") else setStatus("In Ring: Waiting for Target") end
-					else
-						local distToDest = 999
-						local c, h, r = getLatest()
-						if r then distToDest = (r.Position - DEST.Position).Magnitude end
-						if distToDest <= 3.5 then setStatus("Staging Area: Waiting...") else setStatus("Walking to Staging Area (-10)...") end
-					end
-				elseif role == "HEALER" then
-					if currentHealTarget and currentHealTarget.Character then
-						local tr = currentHealTarget.Character:FindFirstChild("HumanoidRootPart")
-						local c, h, r = getLatest()
-						if r and tr then
-							local dist = (r.Position - tr.Position).Magnitude
-							if dist <= 20 then
-								if not isInteracting then
-									isInteracting = true
-									task.spawn(function() pcall(function() performHealSequence(currentHealTarget) end); isInteracting = false end)
-								end
-								setStatus("Healing: " .. currentHealTarget.DisplayName)
-							else setStatus("Chasing: " .. currentHealTarget.DisplayName) end
-						end
-					else setStatus("looking for hurt players...") end
-				elseif role == "ARREST" then
-					if currentArrestTarget and currentArrestTarget.Character then
-						local tr = currentArrestTarget.Character:FindFirstChild("HumanoidRootPart")
-						local c, h, r = getLatest()
-						if r and tr then
-							local dist = (r.Position - tr.Position).Magnitude
-							if dist <= 20 then
-								if not isInteracting then
-									isInteracting = true
-									task.spawn(function() pcall(function() performArrestSequence(currentArrestTarget) end); isInteracting = false end)
-								end
-								setStatus("Arresting: " .. currentArrestTarget.DisplayName)
-							else
-								if dist <= 30 and isToolReady("Taser") and not isInteracting then
-									task.spawn(function()
-										if equipToolTarget("Taser") then
-											local taser = c:FindFirstChild("Taser")
-											local taserEvent = taser and taser:FindFirstChild("TaserEvent")
-											local torso = tr.Parent:FindFirstChild("Torso") or tr.Parent:FindFirstChild("UpperTorso")
-											if taserEvent and torso then
-												aimbotTarget = tr.Parent
-												local startTime = tick()
-												while tick() - startTime < 1 and tr.Parent and alive() do
-													pcall(function() taserEvent:InvokeServer("Tase", torso) end); task.wait(0.1)
-												end
-												aimbotTarget = nil
-											end
-										end
-										equipToolTarget("Box")
-									end)
-								end
-								setStatus("Pursuing hostile: " .. currentArrestTarget.DisplayName)
-							end
-						end
-					else setStatus("Scanning for hostiles...") end
-				end
-			end
-		end)
-	end
-end)
+local updateToggleBtns = function() end
 
 -- ui stuff down below
 local mobileMode = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 local tweenFast = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local tweenSmooth = TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
-
-local WHITELIST = {}
-local whitelistButtons = {}
-local activeNotifications = {}
-
-local DETECTION_CHECK_DELAY = 0.15
-local DETECTION_RANGE = 60
-local DETECTION_CFRAME = CFrame.new(4.31565142, 255.272766, -627.21637)
-local detectionEnabled = true
-local detectedPlayers = {}
-local lastCheck = 0
-local detectionPosition = DETECTION_CFRAME.Position
-local notificationHolder
 
 local function tweenObject(obj, info, props)
 	local tween = TweenService:Create(obj, info, props)
@@ -946,94 +293,6 @@ local function createGlow(parent, size, pos, transparency, rotation)
 	return glow, grad
 end
 
-local function isWhitelisted(targetPlayer)
-	if not targetPlayer then return false end
-	return WHITELIST[targetPlayer.Name] == true
-end
-
-local function notify(titleText, bodyText)
-	if not notificationHolder then return end
-
-	local notif = Instance.new("Frame")
-	notif.Parent = notificationHolder
-	notif.Size = UDim2.new(1, 0, 0, 0)
-	notif.BackgroundTransparency = 1
-	notif.BorderSizePixel = 0
-	notif.ClipsDescendants = true
-	makeCorner(notif, 12)
-
-	local notifGradient = makeGradient(notif, 135)
-	local notifStroke = Instance.new("UIStroke")
-	notifStroke.Parent = notif
-	notifStroke.Thickness = 1
-	notifStroke.Transparency = 1
-
-	local accentBar = Instance.new("Frame")
-	accentBar.Parent = notif
-	accentBar.Size = UDim2.new(0, 4, 1, 0)
-	accentBar.BorderSizePixel = 0
-	accentBar.BackgroundTransparency = 1
-	makeCorner(accentBar, 12)
-
-	local notifTitle = Instance.new("TextLabel")
-	notifTitle.Parent = notif
-	notifTitle.BackgroundTransparency = 1
-	notifTitle.Position = UDim2.new(0, 14, 0, 8)
-	notifTitle.Size = UDim2.new(1, -22, 0, 18)
-	notifTitle.Font = Enum.Font.GothamBold
-	notifTitle.TextSize = 14
-	notifTitle.TextXAlignment = Enum.TextXAlignment.Left
-	notifTitle.TextTransparency = 1
-	notifTitle.Text = tostring(titleText)
-
-	local notifBody = Instance.new("TextLabel")
-	notifBody.Parent = notif
-	notifBody.BackgroundTransparency = 1
-	notifBody.Position = UDim2.new(0, 14, 0, 26)
-	notifBody.Size = UDim2.new(1, -22, 0, 30)
-	notifBody.Font = Enum.Font.Gotham
-	notifBody.TextSize = 12
-	notifBody.TextWrapped = true
-	notifBody.TextXAlignment = Enum.TextXAlignment.Left
-	notifBody.TextYAlignment = Enum.TextYAlignment.Top
-	notifBody.TextTransparency = 1
-	notifBody.Text = tostring(bodyText)
-
-	notifGradient.Color = currentTheme.Button
-	notifStroke.Color = currentTheme.Stroke
-	accentBar.BackgroundColor3 = currentTheme.Accent
-	notifTitle.TextColor3 = currentTheme.Text
-	notifBody.TextColor3 = currentTheme.SubText
-
-	table.insert(activeNotifications, {
-		Frame = notif, Gradient = notifGradient, Stroke = notifStroke,
-		Accent = accentBar, Title = notifTitle, Body = notifBody
-	})
-
-	tweenObject(notif, TweenInfo.new(0.28, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(1, 0, 0, 62), BackgroundTransparency = 0})
-	tweenObject(notifStroke, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Transparency = 0})
-	tweenObject(accentBar, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 0})
-	tweenObject(notifTitle, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {TextTransparency = 0})
-	tweenObject(notifBody, TweenInfo.new(0.28, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {TextTransparency = 0})
-
-	task.delay(2.4, function()
-		if notif and notif.Parent then
-			tweenObject(notifTitle, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {TextTransparency = 1})
-			tweenObject(notifBody, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {TextTransparency = 1})
-			tweenObject(notifStroke, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Transparency = 1})
-			tweenObject(accentBar, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {BackgroundTransparency = 1})
-
-			local closeTween = tweenObject(notif, TweenInfo.new(0.24, Enum.EasingStyle.Quart, Enum.EasingDirection.In), {Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1})
-			closeTween.Completed:Connect(function()
-				for i, data in ipairs(activeNotifications) do
-					if data.Frame == notif then table.remove(activeNotifications, i); break end
-				end
-				notif:Destroy()
-			end)
-		end
-	end)
-end
-
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "SyntaxHubGUI"
 screenGui.ResetOnSpawn = false
@@ -1043,39 +302,18 @@ screenGui.Parent = playerGui
 
 _G.AsylumFarmKill = function()
 	dead = true
-	running = false
-	role = nil
-	aimbotTarget = nil
-	
 	pcall(function()
 	    if getgenv().MyESPLoop then task.cancel(getgenv().MyESPLoop) end
 	    if getgenv().MyBypassLoop then task.cancel(getgenv().MyBypassLoop) end
 	    if getgenv().MyStaminaLoop then task.cancel(getgenv().MyStaminaLoop) end
 	    if getgenv().MyAutoGenLoop then task.cancel(getgenv().MyAutoGenLoop) end 
-	    if getgenv().MyDoorHoldConnection then getgenv().MyDoorHoldConnection:Disconnect() end 
 	    if getgenv().NoclipConnection then getgenv().NoclipConnection:Disconnect() end
 	end)
 	if destroyVirtualPlatform then destroyVirtualPlatform() end
 	
-	if targetHighlight then targetHighlight:Destroy() end
 	if screenGui and screenGui.Parent then screenGui:Destroy() end
 	_G.AsylumFarmKill = nil
 end
-
-notificationHolder = Instance.new("Frame")
-notificationHolder.Name = "NotificationHolder"
-notificationHolder.Parent = screenGui
-notificationHolder.AnchorPoint = Vector2.new(1, 0)
-notificationHolder.Position = UDim2.new(1, -16, 0, 16)
-notificationHolder.Size = UDim2.new(0, 280, 1, -32)
-notificationHolder.BackgroundTransparency = 1
-
-local notifLayout = Instance.new("UIListLayout")
-notifLayout.Parent = notificationHolder
-notifLayout.Padding = UDim.new(0, 8)
-notifLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
-notifLayout.SortOrder = Enum.SortOrder.LayoutOrder
-notifLayout.VerticalAlignment = Enum.VerticalAlignment.Top
 
 local glowHolder = Instance.new("Frame")
 glowHolder.Name = "GlowHolder"
@@ -1232,101 +470,7 @@ pagesHolder.BackgroundTransparency = 1
 pagesHolder.Position = UDim2.new(0, 12, 0, 64)
 pagesHolder.Size = UDim2.new(1, -24, 1, -76)
 
-local page1 = Instance.new("Frame")
-page1.Name = "Page1"
-page1.Parent = pagesHolder
-page1.Size = UDim2.new(1, 0, 1, 0)
-page1.BackgroundTransparency = 1
-
-local farmerBtn = Instance.new("TextButton")
-farmerBtn.Parent = page1
-farmerBtn.Size = UDim2.new(0, 120, 0, 42)
-farmerBtn.Position = UDim2.new(0, 10, 0, 10)
-farmerBtn.Font = Enum.Font.GothamBold
-farmerBtn.TextSize = 13
-farmerBtn.Text = "FARMER"
-farmerBtn.AutoButtonColor = false
-makeCorner(farmerBtn, 8)
-local farmerGrad = makeGradient(farmerBtn, 135)
-local farmerStroke = Instance.new("UIStroke", farmerBtn)
-farmerStroke.Thickness = 1
-
-local feederBtn = Instance.new("TextButton")
-feederBtn.Parent = page1
-feederBtn.Size = UDim2.new(0, 120, 0, 42)
-feederBtn.Position = UDim2.new(0, 140, 0, 10)
-feederBtn.Font = Enum.Font.GothamBold
-feederBtn.TextSize = 13
-feederBtn.Text = "FEEDER"
-feederBtn.AutoButtonColor = false
-makeCorner(feederBtn, 8)
-local feederGrad = makeGradient(feederBtn, 135)
-local feederStroke = Instance.new("UIStroke", feederBtn)
-feederStroke.Thickness = 1
-
-local healerBtn = Instance.new("TextButton")
-healerBtn.Parent = page1
-healerBtn.Size = UDim2.new(0, 120, 0, 42)
-healerBtn.Position = UDim2.new(0, 10, 0, 60)
-healerBtn.Font = Enum.Font.GothamBold
-healerBtn.TextSize = 13
-healerBtn.Text = "HEALER"
-healerBtn.AutoButtonColor = false
-makeCorner(healerBtn, 8)
-local healerGrad = makeGradient(healerBtn, 135)
-local healerStroke = Instance.new("UIStroke", healerBtn)
-healerStroke.Thickness = 1
-
-local arrestBtn = Instance.new("TextButton")
-arrestBtn.Parent = page1
-arrestBtn.Size = UDim2.new(0, 120, 0, 42)
-arrestBtn.Position = UDim2.new(0, 140, 0, 60)
-arrestBtn.Font = Enum.Font.GothamBold
-arrestBtn.TextSize = 13
-arrestBtn.Text = "ARREST"
-arrestBtn.AutoButtonColor = false
-makeCorner(arrestBtn, 8)
-local arrestGrad = makeGradient(arrestBtn, 135)
-local arrestStroke = Instance.new("UIStroke", arrestBtn)
-arrestStroke.Thickness = 1
-
-local safeFarmerBtn = Instance.new("TextButton")
-safeFarmerBtn.Parent = page1
-safeFarmerBtn.Size = UDim2.new(0, 120, 0, 42)
-safeFarmerBtn.Position = UDim2.new(0, 10, 0, 110)
-safeFarmerBtn.Font = Enum.Font.GothamBold
-safeFarmerBtn.TextSize = 13
-safeFarmerBtn.Text = "SAFE FARMER"
-safeFarmerBtn.AutoButtonColor = false
-makeCorner(safeFarmerBtn, 8)
-local safeFarmerGrad = makeGradient(safeFarmerBtn, 135)
-local safeFarmerStroke = Instance.new("UIStroke", safeFarmerBtn)
-safeFarmerStroke.Thickness = 1
-
-local safeFeederBtn = Instance.new("TextButton")
-safeFeederBtn.Parent = page1
-safeFeederBtn.Size = UDim2.new(0, 120, 0, 42)
-safeFeederBtn.Position = UDim2.new(0, 140, 0, 110)
-safeFeederBtn.Font = Enum.Font.GothamBold
-safeFeederBtn.TextSize = 13
-safeFeederBtn.Text = "SAFE FEEDER"
-safeFeederBtn.AutoButtonColor = false
-makeCorner(safeFeederBtn, 8)
-local safeFeederGrad = makeGradient(safeFeederBtn, 135)
-local safeFeederStroke = Instance.new("UIStroke", safeFeederBtn)
-safeFeederStroke.Thickness = 1
-
-local statusLbl = Instance.new("TextLabel")
-statusLbl.Parent = page1
-statusLbl.BackgroundTransparency = 1
-statusLbl.Position = UDim2.new(0, 12, 0, 160) 
-statusLbl.Size = UDim2.new(1, -20, 0, 20)
-statusLbl.Font = Enum.Font.Gotham
-statusLbl.TextSize = 13
-statusLbl.TextXAlignment = Enum.TextXAlignment.Left
-statusLbl.Text = "Status: idle"
-
--- THE PUZZLE AUTO SOLVER PAGE
+-- PAGE 1: FARM PAGE
 local puzzlesPage = Instance.new("Frame")
 puzzlesPage.Name = "PuzzlesPage"
 puzzlesPage.Parent = pagesHolder
@@ -1360,51 +504,73 @@ local autoBatteryGrad = makeGradient(autoBatteryBtn, 135)
 local autoBatteryStroke = Instance.new("UIStroke", autoBatteryBtn)
 autoBatteryStroke.Thickness = 1
 
+-- PAGE 2: PLACEHOLDER (ESP) PAGE
+local placeholderPage = Instance.new("Frame")
+placeholderPage.Name = "PlaceholderPage"
+placeholderPage.Parent = pagesHolder
+placeholderPage.Size = UDim2.new(1, 0, 1, 0)
+placeholderPage.BackgroundTransparency = 1
+placeholderPage.Visible = false
+
+local function createESPToggle(name, posX, posY)
+    local btn = Instance.new("TextButton")
+    btn.Parent = placeholderPage
+    btn.Size = UDim2.new(0, 120, 0, 42)
+    btn.Position = UDim2.new(0, posX, 0, posY)
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.Text = "ESP " .. string.upper(name)
+    btn.AutoButtonColor = false
+    makeCorner(btn, 8)
+    local grad = makeGradient(btn, 135)
+    local stroke = Instance.new("UIStroke", btn)
+    stroke.Thickness = 1
+    return btn, grad, stroke
+end
+
+local espKillerBtn, espKillerGrad, espKillerStroke = createESPToggle("Killer", 10, 10)
+local espGenBtn, espGenGrad, espGenStroke = createESPToggle("Generator", 140, 10)
+local espBatBtn, espBatGrad, espBatStroke = createESPToggle("Battery", 10, 60)
+local espFuseBtn, espFuseGrad, espFuseStroke = createESPToggle("Fusebox", 140, 60)
+local espDoorBtn, espDoorGrad, espDoorStroke = createESPToggle("Doors", 10, 110)
+
+local espAllBtn = Instance.new("TextButton")
+espAllBtn.Parent = placeholderPage
+espAllBtn.Size = UDim2.new(0, 250, 0, 42)
+espAllBtn.Position = UDim2.new(0, 10, 160)
+espAllBtn.Font = Enum.Font.GothamBold
+espAllBtn.TextSize = 13
+espAllBtn.Text = "TURN ON ALL"
+espAllBtn.AutoButtonColor = false
+makeCorner(espAllBtn, 8)
+local espAllGrad = makeGradient(espAllBtn, 135)
+local espAllStroke = Instance.new("UIStroke", espAllBtn)
+espAllStroke.Thickness = 1
 
 local GREEN_ACTIVE = Color3.fromRGB(38, 155, 65)
 
-updateFarmBtns = function()
-	farmerGrad.Color = currentTheme.Button
-	feederGrad.Color = currentTheme.Button
-	healerGrad.Color = currentTheme.Button
-	arrestGrad.Color = currentTheme.Button
-	safeFarmerGrad.Color = currentTheme.Button
-	safeFeederGrad.Color = currentTheme.Button
-	
+updateToggleBtns = function()
+    -- Reset Gradients & Text
 	autoGenGrad.Color = currentTheme.Button
 	autoBatteryGrad.Color = currentTheme.Button
-	
-	farmerBtn.Text = "FARMER"
-	feederBtn.Text = "FEEDER"
-	healerBtn.Text = "HEALER"
-	arrestBtn.Text = "ARREST"
-	safeFarmerBtn.Text = "SAFE FARMER"
-	safeFeederBtn.Text = "SAFE FEEDER"
 	autoGenBtn.Text = "AUTO GEN"
 	autoBatteryBtn.Text = "AUTO BATTERY"
-
-	if running then
-		if role == "FARMER" then 
-			farmerGrad.Color = ColorSequence.new(GREEN_ACTIVE)
-			farmerBtn.Text = "FARMER ●"
-		elseif role == "FEEDER" then 
-			feederGrad.Color = ColorSequence.new(GREEN_ACTIVE)
-			feederBtn.Text = "FEEDER ●"
-		elseif role == "HEALER" then 
-			healerGrad.Color = ColorSequence.new(GREEN_ACTIVE)
-			healerBtn.Text = "HEALER ●"
-		elseif role == "ARREST" then 
-			arrestGrad.Color = ColorSequence.new(GREEN_ACTIVE)
-			arrestBtn.Text = "ARRESTING ●" 
-		elseif role == "SAFE FARMER" then 
-			safeFarmerGrad.Color = ColorSequence.new(GREEN_ACTIVE)
-			safeFarmerBtn.Text = "SAFE FARMER ●"
-		elseif role == "SAFE FEEDER" then 
-			safeFeederGrad.Color = ColorSequence.new(GREEN_ACTIVE)
-			safeFeederBtn.Text = "SAFE FEEDER ●"
-		end
-	end
 	
+	espKillerGrad.Color = currentTheme.Button
+	espGenGrad.Color = currentTheme.Button
+	espBatGrad.Color = currentTheme.Button
+	espFuseGrad.Color = currentTheme.Button
+	espDoorGrad.Color = currentTheme.Button
+	espAllGrad.Color = currentTheme.Button
+	
+	espKillerBtn.Text = "ESP KILLER"
+	espGenBtn.Text = "ESP GENERATOR"
+	espBatBtn.Text = "ESP BATTERY"
+	espFuseBtn.Text = "ESP FUSEBOX"
+	espDoorBtn.Text = "ESP DOORS"
+	espAllBtn.Text = "TURN ON ALL"
+	
+    -- Apply Active States
 	if getgenv().AutoGenEnabled then
 	    autoGenGrad.Color = ColorSequence.new(GREEN_ACTIVE)
 	    autoGenBtn.Text = "AUTO GEN ●"
@@ -1413,122 +579,49 @@ updateFarmBtns = function()
 	    autoBatteryGrad.Color = ColorSequence.new(GREEN_ACTIVE)
 	    autoBatteryBtn.Text = "AUTO BATTERY ●"
 	end
+	
+	if getgenv().ESPToggles.Killer then espKillerGrad.Color = ColorSequence.new(GREEN_ACTIVE); espKillerBtn.Text = "ESP KILLER ●" end
+	if getgenv().ESPToggles.Generator then espGenGrad.Color = ColorSequence.new(GREEN_ACTIVE); espGenBtn.Text = "ESP GENERATOR ●" end
+	if getgenv().ESPToggles.Battery then espBatGrad.Color = ColorSequence.new(GREEN_ACTIVE); espBatBtn.Text = "ESP BATTERY ●" end
+	if getgenv().ESPToggles.Fusebox then espFuseGrad.Color = ColorSequence.new(GREEN_ACTIVE); espFuseBtn.Text = "ESP FUSEBOX ●" end
+	if getgenv().ESPToggles.Doors then espDoorGrad.Color = ColorSequence.new(GREEN_ACTIVE); espDoorBtn.Text = "ESP DOORS ●" end
+	
+	if getgenv().ESPToggles.Killer and getgenv().ESPToggles.Generator and getgenv().ESPToggles.Battery and getgenv().ESPToggles.Fusebox and getgenv().ESPToggles.Doors then
+	    espAllGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+	    espAllBtn.Text = "TURN OFF ALL"
+	end
 end
 
-setStatus = function(txt) if statusLbl then statusLbl.Text = "Status: " .. txt end end
-
-local function resetBotState()
-	running = false; role = nil; targetHighlight.Adornee = nil; isInteracting = false
-	currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1
-	aimbotTarget = nil
-	drawWaypoints({}) 
-	setStatus("Idle")
-end
-
-farmerBtn.MouseButton1Click:Connect(function()
-	if role == "FARMER" and running then resetBotState() else role = "FARMER"; running = true; setStatus("Initializing...") end
-	updateFarmBtns()
-end)
-
-feederBtn.MouseButton1Click:Connect(function()
-	if role == "FEEDER" and running then resetBotState() else role = "FEEDER"; running = true; setStatus("Initializing...") end
-	updateFarmBtns()
-end)
-
-healerBtn.MouseButton1Click:Connect(function()
-	if role == "HEALER" and running then resetBotState() else role = "HEALER"; running = true; setStatus("Initializing Auto-Heal..."); removeDoors() end
-	updateFarmBtns()
-end)
-
-arrestBtn.MouseButton1Click:Connect(function()
-	if role == "ARREST" and running then resetBotState() else role = "ARREST"; running = true; setStatus("Initializing Arrest..."); removeDoors() end
-	updateFarmBtns()
-end)
-
-safeFarmerBtn.MouseButton1Click:Connect(function()
-	if role == "SAFE FARMER" and running then resetBotState() else role = "SAFE FARMER"; running = true; setStatus("Initializing Safe Farm...") end
-	updateFarmBtns()
-end)
-
-safeFeederBtn.MouseButton1Click:Connect(function()
-	if role == "SAFE FEEDER" and running then resetBotState() else role = "SAFE FEEDER"; running = true; setStatus("Initializing Safe Feed...") end
-	updateFarmBtns()
-end)
-
--- The New Puzzle Actions
+-- Button Connections
 autoGenBtn.MouseButton1Click:Connect(function()
     getgenv().AutoGenEnabled = not getgenv().AutoGenEnabled
-    updateFarmBtns()
-    if not getgenv().AutoGenEnabled and not getgenv().AutoBatteryEnabled then
-        cleanupPuzzles()
-    end
+    updateToggleBtns()
+    if not getgenv().AutoGenEnabled and not getgenv().AutoBatteryEnabled then cleanupPuzzles() end
 end)
 
 autoBatteryBtn.MouseButton1Click:Connect(function()
     getgenv().AutoBatteryEnabled = not getgenv().AutoBatteryEnabled
-    updateFarmBtns()
-    if not getgenv().AutoGenEnabled and not getgenv().AutoBatteryEnabled then
-        cleanupPuzzles()
-    end
+    updateToggleBtns()
+    if not getgenv().AutoGenEnabled and not getgenv().AutoBatteryEnabled then cleanupPuzzles() end
 end)
 
-local whitelistPage = Instance.new("Frame")
-whitelistPage.Name = "WhitelistPage"
-whitelistPage.Parent = pagesHolder
-whitelistPage.Size = UDim2.new(1, 0, 1, 0)
-whitelistPage.BackgroundTransparency = 1
-whitelistPage.Visible = false
+espKillerBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Killer = not getgenv().ESPToggles.Killer; updateToggleBtns() end)
+espGenBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Generator = not getgenv().ESPToggles.Generator; updateToggleBtns() end)
+espBatBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Battery = not getgenv().ESPToggles.Battery; updateToggleBtns() end)
+espFuseBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Fusebox = not getgenv().ESPToggles.Fusebox; updateToggleBtns() end)
+espDoorBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Doors = not getgenv().ESPToggles.Doors; updateToggleBtns() end)
 
-local searchBox = Instance.new("TextBox")
-searchBox.Parent = whitelistPage
-searchBox.Size = UDim2.new(1, 0, 0, 40)
-searchBox.Position = UDim2.new(0, 0, 0, 0)
-searchBox.ClearTextOnFocus = false
-searchBox.PlaceholderText = "Search server players..."
-searchBox.Text = ""
-searchBox.Font = Enum.Font.Gotham
-searchBox.TextSize = 14
-searchBox.TextXAlignment = Enum.TextXAlignment.Left
-searchBox.BorderSizePixel = 0
-makeCorner(searchBox, 12)
+espAllBtn.MouseButton1Click:Connect(function()
+    local state = not (getgenv().ESPToggles.Killer and getgenv().ESPToggles.Generator and getgenv().ESPToggles.Battery and getgenv().ESPToggles.Fusebox and getgenv().ESPToggles.Doors)
+    getgenv().ESPToggles.Killer = state
+    getgenv().ESPToggles.Generator = state
+    getgenv().ESPToggles.Battery = state
+    getgenv().ESPToggles.Fusebox = state
+    getgenv().ESPToggles.Doors = state
+    updateToggleBtns()
+end)
 
-local searchPadding = Instance.new("UIPadding")
-searchPadding.Parent = searchBox
-searchPadding.PaddingLeft = UDim.new(0, 12)
-searchPadding.PaddingRight = UDim.new(0, 12)
-
-local searchGradient = makeGradient(searchBox, 135)
-local searchStroke = Instance.new("UIStroke")
-searchStroke.Thickness = 1
-searchStroke.Parent = searchBox
-
-local whitelistListHolder = Instance.new("Frame")
-whitelistListHolder.Parent = whitelistPage
-whitelistListHolder.Position = UDim2.new(0, 0, 0, 48)
-whitelistListHolder.Size = UDim2.new(1, 0, 1, -48)
-whitelistListHolder.BorderSizePixel = 0
-makeCorner(whitelistListHolder, 12)
-
-local whitelistListGradient = makeGradient(whitelistListHolder, 135)
-local whitelistListStroke = Instance.new("UIStroke")
-whitelistListStroke.Thickness = 1
-whitelistListStroke.Parent = whitelistListHolder
-
-local whitelistScroll = Instance.new("ScrollingFrame")
-whitelistScroll.Parent = whitelistListHolder
-whitelistScroll.BackgroundTransparency = 1
-whitelistScroll.BorderSizePixel = 0
-whitelistScroll.Position = UDim2.new(0, 6, 0, 6)
-whitelistScroll.Size = UDim2.new(1, -12, 1, -12)
-whitelistScroll.ScrollBarThickness = 4
-whitelistScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-whitelistScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-
-local whitelistLayout = Instance.new("UIListLayout")
-whitelistLayout.Parent = whitelistScroll
-whitelistLayout.Padding = UDim.new(0, 6)
-whitelistLayout.SortOrder = Enum.SortOrder.LayoutOrder
-
+-- PAGE 3: SETTINGS PAGE
 local themePage = Instance.new("Frame")
 themePage.Name = "ThemePage"
 themePage.Parent = pagesHolder
@@ -1616,15 +709,14 @@ previewLabel.Size = UDim2.new(1, -20, 1, 0)
 previewLabel.Font = Enum.Font.GothamMedium
 previewLabel.TextSize = 14
 previewLabel.TextXAlignment = Enum.TextXAlignment.Left
-previewLabel.Text = "Current Theme: Dark"
+previewLabel.Text = "Current Theme: Sapphire"
 
 local categoryButtons = {}
 local themeButtons = {}
 
 local categories = {
-	{Name = "Home", Page = page1, Title = "Home"},
-	{Name = "Puzzles", Page = puzzlesPage, Title = "Puzzle Auto-Solver"},
-	{Name = "Whitelist", Page = whitelistPage, Title = "Whitelist"},
+	{Name = "Main", Page = puzzlesPage, Title = "Farm"},
+	{Name = "PlaceHolder", Page = placeholderPage, Title = "ESP Controls"},
 	{Name = "Settings", Page = themePage, Title = "Settings"}
 }
 
@@ -1697,67 +789,6 @@ end
 for i, data in ipairs(categories) do createCategoryButton(data, i) end
 for themeName in pairs(Themes) do createThemeButton(themeName) end
 
-local function refreshWhitelistCanvas() task.defer(function() whitelistScroll.CanvasSize = UDim2.new(0, 0, 0, whitelistLayout.AbsoluteContentSize.Y + 8) end) end
-
-local function matchesSearch(targetPlayer, query)
-	if query == "" then return true end
-	local loweredQuery = string.lower(query)
-	return string.find(string.lower(targetPlayer.Name), loweredQuery, 1, true) ~= nil or string.find(string.lower(targetPlayer.DisplayName), loweredQuery, 1, true) ~= nil
-end
-
-local function updateWhitelistButtonTheme(button, whitelisted, stroke)
-	if whitelisted then
-		button.BackgroundColor3 = currentTheme.Accent; button.TextColor3 = Color3.fromRGB(255, 255, 255); stroke.Color = currentTheme.Accent2
-	else
-		button.BackgroundColor3 = currentTheme.Button.Keypoints[1].Value; button.TextColor3 = currentTheme.Text; stroke.Color = currentTheme.Stroke
-	end
-end
-
-local function refreshPlayerList()
-	for _, child in ipairs(whitelistScroll:GetChildren()) do if child:IsA("TextButton") or child:IsA("TextLabel") then child:Destroy() end end
-	table.clear(whitelistButtons)
-
-	local query = string.gsub(searchBox.Text or "", "^%s*(.-)%s*$", "%1")
-	local layoutOrder = 0
-
-	for _, targetPlayer in ipairs(Players:GetPlayers()) do
-		if targetPlayer ~= player and matchesSearch(targetPlayer, query) then
-			layoutOrder += 1
-			local button = Instance.new("TextButton"); button.Parent = whitelistScroll; button.Size = UDim2.new(1, 0, 0, 42); button.BorderSizePixel = 0; button.AutoButtonColor = false; button.LayoutOrder = layoutOrder; button.Font = Enum.Font.GothamBold; button.TextSize = 13; makeCorner(button, 10)
-			local stroke = Instance.new("UIStroke"); stroke.Parent = button; stroke.Thickness = 1
-
-			local function updateButton()
-				local stateText = isWhitelisted(targetPlayer) and "WHITELISTED" or "DETECT"
-				button.Text = targetPlayer.Name .. "  |  " .. targetPlayer.DisplayName .. "  |  " .. stateText
-				updateWhitelistButtonTheme(button, isWhitelisted(targetPlayer), stroke)
-			end
-			updateButton()
-
-			button.MouseEnter:Connect(function() if not isWhitelisted(targetPlayer) then tweenObject(button, tweenFast, {BackgroundColor3 = currentTheme.ButtonHover.Keypoints[1].Value}) end end)
-			button.MouseLeave:Connect(function() updateButton() end)
-			button.MouseButton1Click:Connect(function()
-				if isWhitelisted(targetPlayer) then
-					WHITELIST[targetPlayer.Name] = nil; detectedPlayers[targetPlayer] = nil; notify("Whitelist", targetPlayer.Name .. " removed from whitelist")
-				else
-					WHITELIST[targetPlayer.Name] = true; detectedPlayers[targetPlayer] = nil; notify("Whitelist", targetPlayer.Name .. " added to whitelist")
-				end
-				updateButton()
-			end)
-			whitelistButtons[targetPlayer] = {Button = button, Update = updateButton}
-		end
-	end
-
-	if layoutOrder == 0 then
-		local emptyLabel = Instance.new("TextLabel"); emptyLabel.Parent = whitelistScroll; emptyLabel.BackgroundTransparency = 1; emptyLabel.Size = UDim2.new(1, 0, 0, 40); emptyLabel.LayoutOrder = 1; emptyLabel.Font = Enum.Font.Gotham; emptyLabel.TextSize = 13; emptyLabel.Text = "No matching players found"; emptyLabel.TextColor3 = currentTheme.SubText
-	end
-	refreshWhitelistCanvas()
-end
-
-whitelistLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(refreshWhitelistCanvas)
-searchBox:GetPropertyChangedSignal("Text"):Connect(refreshPlayerList)
-Players.PlayerAdded:Connect(function() task.wait(0.15); refreshPlayerList() end)
-Players.PlayerRemoving:Connect(function(targetPlayer) detectedPlayers[targetPlayer] = nil; WHITELIST[targetPlayer.Name] = nil; task.wait(0.15); refreshPlayerList() end)
-
 local selectedCategory = 1
 local function setCategoryVisual(index, hovering)
 	local data = categoryButtons[index]
@@ -1796,45 +827,35 @@ local function applyTheme(themeName)
 	if not theme then return end
 
 	currentThemeName = themeName; currentTheme = theme
-	mainGradient.Color = theme.Main; topGradient.Color = theme.Topbar; titleFix.BackgroundColor3 = theme.Topbar.Keypoints[#theme.Topbar.Keypoints].Value; sidebarGradient.Color = theme.Main; contentGradient.Color = theme.Main; mainStroke.Color = theme.Stroke; sidebarStroke.Color = theme.Stroke; contentStroke.Color = theme.Stroke; toggleGradient.Color = theme.Button; toggleStroke.Color = theme.Stroke; searchGradient.Color = theme.Button; searchStroke.Color = theme.Stroke; whitelistListGradient.Color = theme.Main; whitelistListStroke.Color = theme.Stroke; titleUnderline.BackgroundColor3 = theme.Accent; innerGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent2), ColorSequenceKeypoint.new(1, theme.Accent)}
-	title.TextColor3 = theme.Text; pageTitle.TextColor3 = theme.Text; searchBox.TextColor3 = theme.Text; searchBox.PlaceholderColor3 = theme.SubText; previewLabel.TextColor3 = theme.Text; toggleButton.TextColor3 = theme.Text; sliderGradient.Color = theme.Topbar; sliderStroke.Color = theme.Stroke; sliderTitle.TextColor3 = theme.Text; sliderFill.BackgroundColor3 = theme.Accent; sliderKnob.BackgroundColor3 = theme.Text
 	
-	if role ~= "FARMER" then farmerGrad.Color = theme.Button end
-	if role ~= "FEEDER" then feederGrad.Color = theme.Button end
-	if role ~= "HEALER" then healerGrad.Color = theme.Button end
-	if role ~= "ARREST" then arrestGrad.Color = theme.Button end
-	if role ~= "SAFE FARMER" then safeFarmerGrad.Color = theme.Button end
-	if role ~= "SAFE FEEDER" then safeFeederGrad.Color = theme.Button end
+	-- Apply primary structural colors
+	mainGradient.Color = theme.Main; topGradient.Color = theme.Topbar; titleFix.BackgroundColor3 = theme.Topbar.Keypoints[#theme.Topbar.Keypoints].Value; sidebarGradient.Color = theme.Main; contentGradient.Color = theme.Main; mainStroke.Color = theme.Stroke; sidebarStroke.Color = theme.Stroke; contentStroke.Color = theme.Stroke; toggleGradient.Color = theme.Button; toggleStroke.Color = theme.Stroke; titleUnderline.BackgroundColor3 = theme.Accent; innerGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent2), ColorSequenceKeypoint.new(1, theme.Accent)}
+	title.TextColor3 = theme.Text; pageTitle.TextColor3 = theme.Text; previewLabel.TextColor3 = theme.Text; toggleButton.TextColor3 = theme.Text; sliderGradient.Color = theme.Topbar; sliderStroke.Color = theme.Stroke; sliderTitle.TextColor3 = theme.Text; sliderFill.BackgroundColor3 = theme.Accent; sliderKnob.BackgroundColor3 = theme.Text
 	
+	-- Update Unselected Button Colors
 	if not getgenv().AutoGenEnabled then autoGenGrad.Color = theme.Button end
 	if not getgenv().AutoBatteryEnabled then autoBatteryGrad.Color = theme.Button end
+	if not getgenv().ESPToggles.Killer then espKillerGrad.Color = theme.Button end
+	if not getgenv().ESPToggles.Generator then espGenGrad.Color = theme.Button end
+	if not getgenv().ESPToggles.Battery then espBatGrad.Color = theme.Button end
+	if not getgenv().ESPToggles.Fusebox then espFuseGrad.Color = theme.Button end
+	if not getgenv().ESPToggles.Doors then espDoorGrad.Color = theme.Button end
+	if not (getgenv().ESPToggles.Killer and getgenv().ESPToggles.Generator and getgenv().ESPToggles.Battery and getgenv().ESPToggles.Fusebox and getgenv().ESPToggles.Doors) then espAllGrad.Color = theme.Button end
 	
-	farmerStroke.Color = theme.Stroke; feederStroke.Color = theme.Stroke; healerStroke.Color = theme.Stroke; arrestStroke.Color = theme.Stroke; safeFarmerStroke.Color = theme.Stroke; safeFeederStroke.Color = theme.Stroke;
+	-- Update button strokes & text colors
 	autoGenStroke.Color = theme.Stroke; autoBatteryStroke.Color = theme.Stroke
+	espKillerStroke.Color = theme.Stroke; espGenStroke.Color = theme.Stroke; espBatStroke.Color = theme.Stroke; espFuseStroke.Color = theme.Stroke; espDoorStroke.Color = theme.Stroke; espAllStroke.Color = theme.Stroke
 	
-	farmerBtn.TextColor3 = theme.Text; feederBtn.TextColor3 = theme.Text; healerBtn.TextColor3 = theme.Text; arrestBtn.TextColor3 = theme.Text; safeFarmerBtn.TextColor3 = theme.Text; safeFeederBtn.TextColor3 = theme.Text;
 	autoGenBtn.TextColor3 = theme.Text; autoBatteryBtn.TextColor3 = theme.Text
+	espKillerBtn.TextColor3 = theme.Text; espGenBtn.TextColor3 = theme.Text; espBatBtn.TextColor3 = theme.Text; espFuseBtn.TextColor3 = theme.Text; espDoorBtn.TextColor3 = theme.Text; espAllBtn.TextColor3 = theme.Text
 	
-	statusLbl.TextColor3 = theme.SubText
-	
+	-- Update Preview Label & Glow Elements
 	previewGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Accent2)}; previewStroke.Color = theme.Accent2; previewLabel.Text = "Current Theme: " .. themeName
 	glow1Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Glow), ColorSequenceKeypoint.new(1, theme.Accent2)}; glow2Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Glow)}; glow1.BackgroundColor3 = theme.Glow; glow2.BackgroundColor3 = theme.Accent
 
 	for i = 1, #categories do setCategoryVisual(i, false) end
 	for name in pairs(themeButtons) do setThemeButtonVisual(themeName, name, false) end
-	for _, notifData in ipairs(activeNotifications) do
-		if notifData.Frame and notifData.Frame.Parent then notifData.Gradient.Color = theme.Button; notifData.Stroke.Color = theme.Stroke; notifData.Accent.BackgroundColor3 = theme.Accent; notifData.Title.TextColor3 = theme.Text; notifData.Body.TextColor3 = theme.SubText end
-	end
-	for _, data in pairs(whitelistButtons) do if data.Update then data.Update() end end
 	
-	if visualsFolder then 
-		for _, part in ipairs(visualsFolder:GetChildren()) do 
-			if part:IsA("BasePart") and part.Color ~= Color3.fromRGB(255, 100, 100) then part.Color = theme.Accent end 
-		end 
-	end
-	if targetHighlight then targetHighlight.FillColor = theme.Accent end
-	
-	refreshPlayerList()
 	local percentage = (math.clamp(tonumber(string.match(sliderTitle.Text, "%d+")) or 0, 0, 100)) / 100
 	applyGlobalTransparency(percentage * 100)
 end
@@ -1883,61 +904,6 @@ end)
 titleBar.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then mainDragInput = input end end)
 UserInputService.InputChanged:Connect(function(input) if draggingMain and input == mainDragInput then local delta = input.Position - dragMainStart; mainFrame.Position = UDim2.new(mainStartPos.X.Scale, mainStartPos.X.Offset + delta.X, mainStartPos.Y.Scale, mainStartPos.Y.Offset + delta.Y); glowHolder.Position = mainFrame.Position end end)
 
-local function getRaycastParams()
-	local params = RaycastParams.new(); params.FilterType = Enum.RaycastFilterType.Exclude; params.FilterDescendantsInstances = {}; params.IgnoreWater = true; return params
-end
-local function playerIsInsideWallAwareArea(otherHRP)
-	if not detectionPosition or not otherHRP then return false end
-	local origin = detectionPosition + Vector3.new(0, 2, 0); local target = otherHRP.Position + Vector3.new(0, 2, 0); local offset = target - origin; local distance = offset.Magnitude
-	if distance > DETECTION_RANGE then return false end
-	local result = workspace:Raycast(origin, offset, getRaycastParams())
-	if result then local hitInstance = result.Instance; if hitInstance and otherHRP:IsDescendantOf(hitInstance.Parent) then return true end; return false end
-	return true
-end
-
-task.spawn(function() task.wait(0.35); notify("Detection", "Detection active at fixed location"); notify("Detection", "Range: " .. tostring(DETECTION_RANGE)) end)
-
-RunService.Heartbeat:Connect(function(deltaTime)
-	if role == "HEALER" or role == "ARREST" then return end
-	if not detectionEnabled or not detectionPosition then return end
-	lastCheck += deltaTime; if lastCheck < DETECTION_CHECK_DELAY then return end; lastCheck = 0
-	local dangerFound = false
-	for _, targetPlayer in ipairs(Players:GetPlayers()) do
-		if targetPlayer ~= player then
-			if isWhitelisted(targetPlayer) then
-				if detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = nil end
-			else
-				local otherCharacter = targetPlayer.Character
-				if otherCharacter then
-					local otherHRP = otherCharacter:FindFirstChild("HumanoidRootPart"); local otherHumanoid = otherCharacter:FindFirstChildOfClass("Humanoid")
-					if otherHRP and otherHumanoid and otherHumanoid.Health > 0 then
-						local inside = playerIsInsideWallAwareArea(otherHRP)
-						if inside then
-							dangerFound = true
-							if not detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = true; notify("Player Detected", targetPlayer.Name .. " entered! Terminating...") end
-						elseif not inside and detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = nil; notify("Player Left", targetPlayer.Name .. " left the area") end
-					else
-						if detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = nil end
-					end
-				else
-					if detectedPlayers[targetPlayer] then detectedPlayers[targetPlayer] = nil end
-				end
-			end
-		end
-	end
-	if dangerFound then
-		if running then
-			savedRole = role; running = false; isPausedForSafety = true; currentWaypoints = {}; lastComputedTargetPos = nil; currentWpIndex = 1; updateFarmBtns(); setStatus("TERMINATING")
-			local c, h = getLatest(); if h then h.Health = 0 end
-		end
-	else
-		if isPausedForSafety and not dangerFound then
-			isPausedForSafety = false; notify("Safe", "Area clear. Resuming in 5s...")
-			task.delay(5, function() if not isPausedForSafety and savedRole then role = savedRole; running = true; updateFarmBtns(); setStatus("Resumed") end end)
-		end
-	end
-end)
-
 task.spawn(function()
 	while screenGui.Parent do
 		tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.3, 0, 0.32, 0)}); tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.7, 0, 0.68, 0)}); task.wait(2.6)
@@ -1945,11 +911,11 @@ task.spawn(function()
 	end
 end)
 
-switchCategory(1); refreshPlayerList(); applyTheme("Emerald")
+switchCategory(1); applyTheme("Sapphire")
 
----------------------------------------------------------
--- THE PUZZLE ENGINE (Scanner Logic Fully Restored!)
----------------------------------------------------------
+-- ========================================================
+-- THE PUZZLE & ESP ENGINE (OPTIMIZED)
+-- ========================================================
 local function getPromptPos(prompt, obj)
     if prompt.Parent then
         if prompt.Parent:IsA("Attachment") then return prompt.Parent.WorldPosition end
@@ -1960,62 +926,48 @@ local function getPromptPos(prompt, obj)
 end
 
 local function scanForPuzzleTarget(charPos)
-    local bestPrompt, bestPos, bestDist, bestObject = nil, nil, math.huge, nil
-    local targetType = nil
+    local bestPrompt, bestPos, bestDist, bestObject, targetType = nil, nil, math.huge, nil, nil
     
-    if getgenv().AutoGenEnabled then
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if string.find(string.lower(obj.Name), "generator") and not obj:IsA("Folder") then
-                for _, child in ipairs(obj:GetDescendants()) do
-                    if child:IsA("ProximityPrompt") and child.Enabled then
-                        local pPos = getPromptPos(child, obj)
-                        if pPos then
-                            local dist = (charPos - pPos).Magnitude
-                            if dist < bestDist then
-                                bestDist = dist; bestPrompt = child; bestPos = pPos; bestObject = obj; targetType = "Generator"
-                            end
+    for prompt, _ in pairs(WorldCache.Prompts) do
+        if prompt.Enabled and prompt.Parent then
+            local obj = prompt.Parent
+            if obj:IsA("Attachment") then obj = obj.Parent end
+            if obj and obj.Parent and obj.Parent:IsA("Model") then obj = obj.Parent end
+            
+            if obj and (obj:IsA("Model") or obj:IsA("BasePart")) then
+                local pPos = getPromptPos(prompt, obj)
+                if pPos then
+                    local dist = (charPos - pPos).Magnitude
+                    
+                    if getgenv().AutoGenEnabled and WorldCache.Generators[obj] then
+                        if dist < bestDist then bestDist = dist; bestPrompt = prompt; bestPos = pPos; bestObject = obj; targetType = "Generator" end
+                    elseif getgenv().AutoBatteryEnabled then
+                        local holdingBattery = false
+                        local c = player.Character
+                        if c then for _, child in ipairs(c:GetChildren()) do if string.find(string.lower(child.Name), "battery") then holdingBattery = true break end end end
+                        
+                        if holdingBattery and WorldCache.Fuseboxes[obj] then
+                            if dist < bestDist then bestDist = dist; bestPrompt = prompt; bestPos = pPos; bestObject = obj; targetType = "fuse" end
+                        elseif not holdingBattery and WorldCache.Batteries[obj] then
+                            if dist < bestDist then bestDist = dist; bestPrompt = prompt; bestPos = pPos; bestObject = obj; targetType = "batter" end
                         end
                     end
                 end
             end
         end
     end
-    
-    if not bestPrompt and getgenv().AutoBatteryEnabled then
-        local holdingBattery = false
-        local c = player.Character
-        if c then for _, child in ipairs(c:GetDescendants()) do if string.find(string.lower(child.Name), "battery") then holdingBattery = true break end end end
-        
-        local matchName = holdingBattery and "fusebox" or "battery"
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if string.find(string.lower(obj.Name), matchName) and not obj:IsA("Folder") then
-                for _, child in ipairs(obj:GetDescendants()) do
-                    if child:IsA("ProximityPrompt") and child.Enabled then
-                        local pPos = getPromptPos(child, obj)
-                        if pPos then
-                            local dist = (charPos - pPos).Magnitude
-                            if dist < bestDist then
-                                bestDist = dist; bestPrompt = child; bestPos = pPos; bestObject = obj; targetType = matchName
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-    
     return bestPrompt, bestPos, bestObject, targetType
 end
 
 local function fireAllPromptsNear(charPos, radius)
     if not fireproximityprompt then return end
-    for _, obj in ipairs(workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") and obj.Enabled then
-            local pPos = getPromptPos(obj, obj.Parent)
+    for prompt, _ in pairs(WorldCache.Prompts) do
+        if prompt.Enabled then
+            local pPos = getPromptPos(prompt, prompt.Parent)
             if pPos and (charPos - pPos).Magnitude <= radius then 
-                obj.MaxActivationDistance = 100 
-                obj.RequiresLineOfSight = false
-                fireproximityprompt(obj)
+                prompt.MaxActivationDistance = 100 
+                prompt.RequiresLineOfSight = false
+                fireproximityprompt(prompt)
             end
         end
     end
@@ -2047,14 +999,13 @@ getgenv().MyAutoGenLoop = task.spawn(function()
     while true do
         task.wait(0.2) 
         pcall(function()
-            if getgenv().AutoGenEnabled or getgenv().AutoBatteryEnabled then
-                local char = localPlayer.Character
+            if (getgenv().AutoGenEnabled or getgenv().AutoBatteryEnabled) then
+                local char = player.Character
                 if not char or not char.Parent then return end 
                 local hrp = char:FindFirstChild("HumanoidRootPart")
                 local hum = char:FindFirstChild("Humanoid")
                 
                 if hrp and hum and hum.Health > 0 then
-                    -- If we are in the spawn area / lobby ring, don't do puzzles!
                     if isInPuzzleSafeZone(hrp.Position) then cleanupPuzzles(); getgenv().IsUnderground = false; return end
                     
                     if not getgenv().NoclipConnection then
@@ -2089,13 +1040,11 @@ getgenv().MyAutoGenLoop = task.spawn(function()
                     
                     if targetType == "Generator" then
                         while timeout < 60 do 
-                            local genUI = localPlayer:FindFirstChild("PlayerGui") and localPlayer.PlayerGui:FindFirstChild("Gen")
+                            local genUI = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("Gen")
                             if genUI and genUI.Enabled then successfullyOpened = true; break end
-                            
                             nearestPrompt.MaxActivationDistance = 100; nearestPrompt.RequiresLineOfSight = false
                             if fireproximityprompt then fireproximityprompt(nearestPrompt) end
                             fireAllPromptsNear(hrp.Position, 50)
-                            
                             task.wait(0.05); timeout = timeout + 1
                         end
                     else
@@ -2113,7 +1062,7 @@ getgenv().MyAutoGenLoop = task.spawn(function()
                         if targetType == "Generator" then
                             getgenv().SafeToBypass = true 
                             while (getgenv().AutoGenEnabled or getgenv().AutoBatteryEnabled) and hum.Health > 0 do
-                                local genUI = localPlayer:FindFirstChild("PlayerGui") and localPlayer.PlayerGui:FindFirstChild("Gen")
+                                local genUI = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("Gen")
                                 if not genUI or not genUI.Enabled or not nearestPrompt or not nearestPrompt.Parent or not nearestPrompt.Enabled then break end
                                 task.wait(0.1)
                             end
@@ -2133,7 +1082,7 @@ getgenv().MyBypassLoop = task.spawn(function()
         task.wait(0.05) 
         pcall(function()
             if getgenv().SafeToBypass then 
-                local playerGui = localPlayer:FindFirstChild("PlayerGui")
+                local playerGui = player:FindFirstChild("PlayerGui")
                 if playerGui then
                     local genUI = playerGui:FindFirstChild("Gen")
                     if genUI and genUI.Enabled then
@@ -2155,28 +1104,52 @@ getgenv().MyESPLoop = task.spawn(function()
     while true do
         task.wait(1) 
         pcall(function()
-            for _, obj in ipairs(workspace:GetDescendants()) do
-                local objName = string.lower(obj.Name)
-                if string.find(objName, "generator") and not obj:IsA("Folder") then
-                    local isDone = true 
+            -- Killer ESP
+            if getgenv().ESPToggles.Killer then
+                local killerFolder = workspace:FindFirstChild("KILLER")
+                if killerFolder then for _, child in ipairs(killerFolder:GetChildren()) do applyHighlight(child, "KillerHighlight", KILLER_FILL) end end
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p == player then continue end 
+                    local isKiller = false
+                    if p.Character then for _, child in ipairs(p.Character:GetChildren()) do if string.find(string.lower(child.Name), "killer") then isKiller = true break end end end
+                    if isKiller and p.Character then applyHighlight(p.Character, "KillerHighlight", KILLER_FILL) end
+                end
+            else
+                clearHighlights("KillerHighlight")
+            end
+
+            -- Door ESP
+            if getgenv().ESPToggles.Doors then
+                for obj, _ in pairs(WorldCache.Doors) do applyHighlight(obj, "DoorHighlight", DOOR_FILL) end
+            else
+                clearHighlights("DoorHighlight")
+            end
+            
+            -- Battery ESP
+            if getgenv().ESPToggles.Battery then
+                for obj, _ in pairs(WorldCache.Batteries) do applyHighlight(obj, "BatteryHighlight", BATTERY_FILL) end
+            else
+                clearHighlights("BatteryHighlight")
+            end
+            
+            -- Fusebox ESP
+            if getgenv().ESPToggles.Fusebox then
+                for obj, _ in pairs(WorldCache.Fuseboxes) do applyHighlight(obj, "FuseBoxHighlight", FUSEBOX_FILL) end
+            else
+                clearHighlights("FuseBoxHighlight")
+            end
+
+            -- Generator ESP
+            if getgenv().ESPToggles.Generator then
+                for obj, _ in pairs(WorldCache.Generators) do
+                    local isDone = true
                     for _, child in ipairs(obj:GetDescendants()) do
-                        if child:IsA("ProximityPrompt") and child.Enabled == true then isDone = false break end
+                        if child:IsA("ProximityPrompt") and child.Enabled then isDone = false break end
                     end
                     if isDone then applyHighlight(obj, "GeneratorHighlight", GENERATOR_DONE) else applyHighlight(obj, "GeneratorHighlight", GENERATOR_NOT_DONE) end
-                elseif string.find(objName, "battery") and not obj:IsA("Folder") then 
-                    applyHighlight(obj, "BatteryHighlight", BATTERY_FILL)
-                elseif string.find(objName, "fusebox") and not obj:IsA("Folder") then 
-                    applyHighlight(obj, "FuseBoxHighlight", FUSEBOX_FILL) 
                 end
-            end
-            local killerFolder = workspace:FindFirstChild("KILLER")
-            if killerFolder then for _, child in ipairs(killerFolder:GetChildren()) do applyHighlight(child, "KillerHighlight", KILLER_FILL) end end
-            for _, p in ipairs(Players:GetPlayers()) do
-                if p == localPlayer then continue end 
-                local isKiller = false
-                for _, child in ipairs(p:GetDescendants()) do if string.find(string.lower(child.Name), "killer") then isKiller = true break end end
-                if not isKiller and p.Character then for _, child in ipairs(p.Character:GetDescendants()) do if string.find(string.lower(child.Name), "killer") then isKiller = true break end end end
-                if isKiller and p.Character then applyHighlight(p.Character, "KillerHighlight", KILLER_FILL) end
+            else
+                clearHighlights("GeneratorHighlight")
             end
         end)
     end
@@ -2184,9 +1157,9 @@ end)
 
 getgenv().MyStaminaLoop = task.spawn(function()
     while true do
-        task.wait(0.1) 
+        task.wait(0.5) 
         pcall(function()
-            local char = localPlayer.Character
+            local char = player.Character
             if char then
                 local currentStamina = char:GetAttribute("Stamina")
                 if currentStamina and currentStamina < 100 then char:SetAttribute("Stamina", 100) end
