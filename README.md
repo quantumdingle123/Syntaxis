@@ -1,4 +1,4 @@
-if_G.AsylumFarmKill then _G.AsylumFarmKill() end
+if _G.AsylumFarmKill then _G.AsylumFarmKill() end
 
 -- grab all the standard roblox services we need
 local Players = game:GetService("Players")
