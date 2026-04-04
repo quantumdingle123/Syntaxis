@@ -1,0 +1,1344 @@
+if _G.AsylumFarmKill then _G.AsylumFarmKill() end
+
+-- grab all the standard roblox services we need
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualUser = game:GetService("VirtualUser")
+local CoreGui = game:GetService("CoreGui")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+local camera = workspace.CurrentCamera
+
+-- ========================================================
+-- KEY SYSTEM UI
+-- ========================================================
+local KeyScreen = Instance.new("ScreenGui")
+KeyScreen.Name = "SyntaxKeyScreen"
+KeyScreen.ResetOnSpawn = false
+KeyScreen.DisplayOrder = 999999999
+KeyScreen.ZIndexBehavior = Enum.ZIndexBehavior.Global
+KeyScreen.Parent = playerGui
+
+local KeyFrame = Instance.new("Frame")
+KeyFrame.Size = UDim2.new(0, 320, 0, 160)
+KeyFrame.Position = UDim2.new(0.5, -160, 0.5, -80)
+KeyFrame.BackgroundColor3 = Color3.fromRGB(15, 20, 30)
+KeyFrame.BorderSizePixel = 0
+KeyFrame.ClipsDescendants = true
+KeyFrame.Parent = KeyScreen
+
+local KeyFrameCorner = Instance.new("UICorner")
+KeyFrameCorner.CornerRadius = UDim.new(0, 12)
+KeyFrameCorner.Parent = KeyFrame
+
+local KeyStroke = Instance.new("UIStroke")
+KeyStroke.Color = Color3.fromRGB(42, 78, 132)
+KeyStroke.Thickness = 2
+KeyStroke.Parent = KeyFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 40)
+Title.BackgroundTransparency = 1
+Title.Text = "Syntax Hub"
+Title.TextColor3 = Color3.fromRGB(240, 248, 255)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 18
+Title.TextXAlignment = Enum.TextXAlignment.Center
+Title.Parent = KeyFrame
+
+local KeyInput = Instance.new("TextBox")
+KeyInput.Size = UDim2.new(0, 280, 0, 40)
+KeyInput.Position = UDim2.new(0, 20, 0, 50)
+KeyInput.BackgroundColor3 = Color3.fromRGB(25, 30, 45)
+KeyInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+KeyInput.PlaceholderText = "Redeem key"
+KeyInput.Text = "" 
+KeyInput.Font = Enum.Font.Gotham
+KeyInput.TextSize = 14
+KeyInput.ClearTextOnFocus = false
+KeyInput.Parent = KeyFrame
+
+local InputCorner = Instance.new("UICorner")
+InputCorner.CornerRadius = UDim.new(0, 8)
+InputCorner.Parent = KeyInput
+
+local InputStroke = Instance.new("UIStroke")
+InputStroke.Color = Color3.fromRGB(42, 78, 132)
+InputStroke.Thickness = 1
+InputStroke.Parent = KeyInput
+
+local SubmitBtn = Instance.new("TextButton")
+SubmitBtn.Size = UDim2.new(0, 280, 0, 40)
+SubmitBtn.Position = UDim2.new(0, 20, 0, 105)
+SubmitBtn.BackgroundColor3 = Color3.fromRGB(42, 78, 132)
+SubmitBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+SubmitBtn.Font = Enum.Font.GothamBold
+SubmitBtn.TextSize = 14
+SubmitBtn.Text = "Verify Key"
+SubmitBtn.AutoButtonColor = false
+SubmitBtn.Parent = KeyFrame
+
+local BtnCorner = Instance.new("UICorner")
+BtnCorner.CornerRadius = UDim.new(0, 8)
+BtnCorner.Parent = SubmitBtn
+
+local function loadMainScript()
+    -- simulate dummy clicks so roblox doesn't kick us for being afk
+    player.Idled:Connect(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+
+    -- ========================================================
+    -- SMART CACHE SYSTEM (LAG FIX)
+    -- ========================================================
+    local WorldCache = {
+        Prompts = {},
+        Generators = {},
+        Batteries = {},
+        Fuseboxes = {},
+        Doors = {}
+    }
+
+    local function addToCache(obj)
+        if obj:IsA("ProximityPrompt") then
+            WorldCache.Prompts[obj] = true
+        elseif obj:IsA("Model") or obj:IsA("BasePart") then
+            local name = string.lower(obj.Name)
+            if string.find(name, "door") then WorldCache.Doors[obj] = true
+            elseif string.find(name, "gen") then WorldCache.Generators[obj] = true
+            elseif string.find(name, "batter") then WorldCache.Batteries[obj] = true
+            elseif string.find(name, "fuse") then WorldCache.Fuseboxes[obj] = true
+            end
+        end
+    end
+
+    local function removeFromCache(obj)
+        WorldCache.Prompts[obj] = nil
+        WorldCache.Doors[obj] = nil
+        WorldCache.Generators[obj] = nil
+        WorldCache.Batteries[obj] = nil
+        WorldCache.Fuseboxes[obj] = nil
+    end
+
+    -- Safely scan the map once at startup
+    task.spawn(function()
+        local descendants = workspace:GetDescendants()
+        for i, obj in ipairs(descendants) do
+            addToCache(obj)
+            if i % 1000 == 0 then task.wait() end -- Yields briefly so your game doesn't freeze on inject
+        end
+        -- Keep cache updated automatically without lagging
+        workspace.DescendantAdded:Connect(addToCache)
+        workspace.DescendantRemoving:Connect(removeFromCache)
+    end)
+
+    -- ========================================================
+    -- PUZZLE & ESP ENGINE CONFIG & VARIABLES 
+    -- ========================================================
+    local GENERATOR_NOT_DONE = Color3.fromRGB(255, 255, 0)
+    local GENERATOR_DONE = Color3.fromRGB(0, 255, 0)       
+    local KILLER_FILL = Color3.fromRGB(255, 0, 0)          
+    local BATTERY_FILL = Color3.fromRGB(0, 170, 255)       
+    local FUSEBOX_FILL = Color3.fromRGB(255, 128, 0)       
+    local DOOR_FILL = Color3.fromRGB(255, 0, 255) 
+    local OUTLINE_COLOR = Color3.fromRGB(255, 255, 255)    
+    local FILL_TRANSPARENCY = 0.5
+    local OUTLINE_TRANSPARENCY = 0.1
+
+    getgenv().AutoGenEnabled = false
+    getgenv().AutoBatteryEnabled = false
+    getgenv().MachineBypassEnabled = false
+    getgenv().InfiniteStamina = false
+
+    -- ESP State Toggles
+    getgenv().ESPToggles = {
+        Killer = false,
+        Generator = false,
+        Battery = false,
+        Fusebox = false,
+        Doors = false
+    }
+
+    getgenv().IsUnderground = false 
+    getgenv().SafeToBypass = false
+    getgenv().CurrentPlatform = nil
+
+    local dead = false
+    local ActiveHighlights = {}
+
+    local function getLatest()
+        local c = player.Character
+        if not c then return nil, nil, nil end
+        local h = c:FindFirstChildOfClass("Humanoid")
+        local r = c:FindFirstChild("HumanoidRootPart")
+        return c, h, r
+    end
+
+    local function alive()
+        local c, h, r = getLatest()
+        return (c ~= nil and h ~= nil and r ~= nil and h.Health > 0 and c.Parent ~= nil)
+    end
+
+    -- PUZZLE SAFE ZONE (Used by Auto Gen)
+    local SAFE_ZONE_CENTER = Vector3.new(438.781769, 54.7710724, 109.080544)
+    local SAFE_ZONE_RADIUS = 100 
+    local function isInPuzzleSafeZone(pos)
+        return math.abs(pos.X - SAFE_ZONE_CENTER.X) <= SAFE_ZONE_RADIUS and
+               math.abs(pos.Y - SAFE_ZONE_CENTER.Y) <= SAFE_ZONE_RADIUS and
+               math.abs(pos.Z - SAFE_ZONE_CENTER.Z) <= SAFE_ZONE_RADIUS
+    end
+
+    local function applyHighlight(target, highlightName, fillColor)
+        if not target then return end
+        local hl = ActiveHighlights[target]
+        if not hl or not hl.Parent then
+            hl = Instance.new("Highlight")
+            hl.Name = highlightName
+            hl.OutlineColor = OUTLINE_COLOR
+            hl.FillTransparency = FILL_TRANSPARENCY
+            hl.OutlineTransparency = OUTLINE_TRANSPARENCY
+            hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            hl.Adornee = target
+            
+            -- Try to parent to CoreGui for safety, fallback to target
+            local success = pcall(function() hl.Parent = CoreGui end)
+            if not success then hl.Parent = target end
+            
+            ActiveHighlights[target] = hl
+        end
+        hl.FillColor = fillColor
+        hl.Enabled = true
+    end
+
+    local function clearHighlights(hName)
+        for target, hl in pairs(ActiveHighlights) do
+            if hl and hl.Name == hName then
+                hl.Enabled = false
+            end
+        end
+    end
+
+    local function destroyVirtualPlatform()
+        if getgenv().CurrentPlatform then
+            getgenv().CurrentPlatform:Destroy()
+            getgenv().CurrentPlatform = nil
+        end
+    end
+
+    local function createVirtualPlatform(pos)
+        destroyVirtualPlatform()
+        local plat = Instance.new("Part")
+        plat.Name = "SafeVirtualPlatform"
+        plat.Size = Vector3.new(25, 1, 25) 
+        plat.Position = pos - Vector3.new(0, 3.2, 0)
+        plat.Anchored = true
+        plat.CanCollide = true
+        plat.Transparency = 1 
+        plat.Parent = workspace
+        getgenv().CurrentPlatform = plat
+    end
+
+    local function cleanupPuzzles()
+        local char = player.Character
+        if char then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            local hum = char:FindFirstChild("Humanoid")
+            if hrp then hrp.Anchored = false end
+            if hum then hum.PlatformStand = false end
+            local bv = hrp and hrp:FindFirstChild("SafeHover")
+            if bv then bv:Destroy() end
+        end
+        if getgenv().NoclipConnection then 
+            getgenv().NoclipConnection:Disconnect() 
+            getgenv().NoclipConnection = nil
+        end
+        destroyVirtualPlatform()
+        getgenv().SafeToBypass = false
+    end
+
+    -- All Stunning UI Themes
+    local Themes = {
+        Sapphire = {
+            Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(10, 24, 50)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 40, 78)), ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 58, 108))},
+            Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 36, 70)), ColorSequenceKeypoint.new(1, Color3.fromRGB(34, 62, 110))},
+            Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 78, 132)), ColorSequenceKeypoint.new(1, Color3.fromRGB(58, 102, 166))},
+            ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 110, 176)), ColorSequenceKeypoint.new(1, Color3.fromRGB(86, 142, 215))},
+            Accent = Color3.fromRGB(92, 170, 255), Accent2 = Color3.fromRGB(160, 215, 255),
+            Text = Color3.fromRGB(240, 248, 255), SubText = Color3.fromRGB(180, 210, 235), Stroke = Color3.fromRGB(88, 132, 185), Glow = Color3.fromRGB(96, 180, 255)
+        },
+        Ruby = {
+            Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 5, 5)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(45, 8, 8)), ColorSequenceKeypoint.new(1, Color3.fromRGB(60, 10, 10))},
+            Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(40, 8, 8)), ColorSequenceKeypoint.new(1, Color3.fromRGB(70, 12, 12))},
+            Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(80, 15, 15)), ColorSequenceKeypoint.new(1, Color3.fromRGB(110, 20, 20))},
+            ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(100, 20, 20)), ColorSequenceKeypoint.new(1, Color3.fromRGB(140, 30, 30))},
+            Accent = Color3.fromRGB(220, 20, 40), Accent2 = Color3.fromRGB(255, 60, 80),
+            Text = Color3.fromRGB(255, 230, 230), SubText = Color3.fromRGB(200, 150, 150), Stroke = Color3.fromRGB(140, 40, 40), Glow = Color3.fromRGB(255, 30, 50)
+        },
+        Void = {
+            Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(12, 12, 18)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(20, 15, 28)), ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 20, 40))},
+            Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 15, 25)), ColorSequenceKeypoint.new(1, Color3.fromRGB(30, 22, 45))},
+            Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(45, 30, 65)), ColorSequenceKeypoint.new(1, Color3.fromRGB(65, 40, 90))},
+            ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 40, 85)), ColorSequenceKeypoint.new(1, Color3.fromRGB(85, 55, 120))},
+            Accent = Color3.fromRGB(150, 80, 255), Accent2 = Color3.fromRGB(200, 120, 255),
+            Text = Color3.fromRGB(240, 240, 255), SubText = Color3.fromRGB(180, 160, 200), Stroke = Color3.fromRGB(90, 60, 130), Glow = Color3.fromRGB(160, 90, 255)
+        },
+        Ocean = {
+            Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(5, 25, 30)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(10, 40, 45)), ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 60, 65))},
+            Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(8, 35, 40)), ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 55, 60))},
+            Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(20, 80, 90)), ColorSequenceKeypoint.new(1, Color3.fromRGB(30, 110, 120))},
+            ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(30, 100, 110)), ColorSequenceKeypoint.new(1, Color3.fromRGB(40, 135, 150))},
+            Accent = Color3.fromRGB(40, 200, 220), Accent2 = Color3.fromRGB(100, 240, 255),
+            Text = Color3.fromRGB(220, 250, 255), SubText = Color3.fromRGB(160, 210, 220), Stroke = Color3.fromRGB(40, 140, 150), Glow = Color3.fromRGB(60, 220, 240)
+        },
+        Dark = {
+            Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(18, 18, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(28, 28, 36)), ColorSequenceKeypoint.new(1, Color3.fromRGB(38, 38, 48))},
+            Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(24, 24, 32)), ColorSequenceKeypoint.new(1, Color3.fromRGB(40, 40, 52))},
+            Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(42, 42, 56)), ColorSequenceKeypoint.new(1, Color3.fromRGB(58, 58, 74))},
+            ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(60, 60, 78)), ColorSequenceKeypoint.new(1, Color3.fromRGB(84, 84, 104))},
+            Accent = Color3.fromRGB(120, 125, 145), Accent2 = Color3.fromRGB(170, 175, 195),
+            Text = Color3.fromRGB(240, 240, 245), SubText = Color3.fromRGB(180, 180, 195), Stroke = Color3.fromRGB(85, 85, 105), Glow = Color3.fromRGB(130, 135, 160)
+        },
+        Emerald = {
+            Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(10, 32, 24)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 52, 38)), ColorSequenceKeypoint.new(1, Color3.fromRGB(26, 76, 54))},
+            Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(16, 46, 34)), ColorSequenceKeypoint.new(1, Color3.fromRGB(28, 72, 52))},
+            Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(34, 92, 66)), ColorSequenceKeypoint.new(1, Color3.fromRGB(50, 124, 88))},
+            ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(58, 136, 98)), ColorSequenceKeypoint.new(1, Color3.fromRGB(78, 170, 125))},
+            Accent = Color3.fromRGB(86, 220, 156), Accent2 = Color3.fromRGB(152, 255, 204),
+            Text = Color3.fromRGB(236, 255, 245), SubText = Color3.fromRGB(176, 220, 196), Stroke = Color3.fromRGB(72, 150, 112), Glow = Color3.fromRGB(100, 255, 180)
+        },
+        Gold = {
+            Main = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(44, 30, 10)), ColorSequenceKeypoint.new(0.5, Color3.fromRGB(66, 46, 16)), ColorSequenceKeypoint.new(1, Color3.fromRGB(92, 68, 24))},
+            Topbar = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(68, 46, 14)), ColorSequenceKeypoint.new(1, Color3.fromRGB(110, 78, 26))},
+            Button = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(132, 96, 32)), ColorSequenceKeypoint.new(1, Color3.fromRGB(170, 126, 44))},
+            ButtonHover = ColorSequence.new{ColorSequenceKeypoint.new(0, Color3.fromRGB(182, 140, 52)), ColorSequenceKeypoint.new(1, Color3.fromRGB(224, 178, 74))},
+            Accent = Color3.fromRGB(255, 204, 82), Accent2 = Color3.fromRGB(255, 232, 145),
+            Text = Color3.fromRGB(255, 248, 232), SubText = Color3.fromRGB(228, 210, 170), Stroke = Color3.fromRGB(190, 148, 62), Glow = Color3.fromRGB(255, 214, 92)
+        }
+    }
+
+    local currentThemeName = "Sapphire"
+    local currentTheme = Themes[currentThemeName]
+
+    local updateToggleBtns = function() end
+
+    -- ui stuff down below
+    local mobileMode = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
+    local tweenFast = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local tweenSmooth = TweenInfo.new(0.35, Enum.EasingStyle.Quart, Enum.EasingDirection.Out)
+
+    local function tweenObject(obj, info, props)
+        local tween = TweenService:Create(obj, info, props)
+        tween:Play()
+        return tween
+    end
+
+    local function makeCorner(parent, radius)
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, radius)
+        c.Parent = parent
+        return c
+    end
+
+    local function makeGradient(parent, rotation)
+        local g = Instance.new("UIGradient")
+        g.Rotation = rotation or 0
+        g.Parent = parent
+        return g
+    end
+
+    local function createGlow(parent, size, pos, transparency, rotation)
+        local glow = Instance.new("Frame")
+        glow.AnchorPoint = Vector2.new(0.5, 0.5)
+        glow.Position = pos
+        glow.Size = size
+        glow.BackgroundTransparency = transparency
+        glow.BorderSizePixel = 0
+        glow.Parent = parent
+        makeCorner(glow, 999)
+
+        local grad = makeGradient(glow, rotation)
+        grad.Transparency = NumberSequence.new{
+            NumberSequenceKeypoint.new(0, 0.18),
+            NumberSequenceKeypoint.new(1, 1)
+        }
+        return glow, grad
+    end
+
+    local screenGui = Instance.new("ScreenGui")
+    screenGui.Name = "SyntaxHubGUI"
+    screenGui.ResetOnSpawn = false
+    screenGui.DisplayOrder = 999999999 
+    screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+    screenGui.Parent = playerGui
+
+    _G.AsylumFarmKill = function()
+        dead = true
+        if KeyScreen and KeyScreen.Parent then KeyScreen:Destroy() end
+        pcall(function()
+            if getgenv().MyESPLoop then task.cancel(getgenv().MyESPLoop) end
+            if getgenv().MyBypassLoop then task.cancel(getgenv().MyBypassLoop) end
+            if getgenv().MyStaminaLoop then task.cancel(getgenv().MyStaminaLoop) end
+            if getgenv().MyAutoGenLoop then task.cancel(getgenv().MyAutoGenLoop) end 
+            if getgenv().NoclipConnection then getgenv().NoclipConnection:Disconnect() end
+        end)
+        if destroyVirtualPlatform then destroyVirtualPlatform() end
+        
+        if screenGui and screenGui.Parent then screenGui:Destroy() end
+        _G.AsylumFarmKill = nil
+    end
+
+    local glowHolder = Instance.new("Frame")
+    glowHolder.Name = "GlowHolder"
+    glowHolder.AnchorPoint = Vector2.new(0.5, 0.5)
+    glowHolder.Position = UDim2.new(0.5, 0, 0.5, 0)
+    glowHolder.Size = UDim2.new(0, 640, 0, 400)
+    glowHolder.BackgroundTransparency = 1
+    glowHolder.Parent = screenGui
+
+    local glow1, glow1Gradient = createGlow(glowHolder, UDim2.new(0, 180, 0, 180), UDim2.new(0.25, 0, 0.28, 0), 0.86, 45)
+    local glow2, glow2Gradient = createGlow(glowHolder, UDim2.new(0, 220, 0, 220), UDim2.new(0.76, 0, 0.72, 0), 0.9, 120)
+
+    local mainFrame = Instance.new("Frame")
+    mainFrame.Name = "MainFrame"
+    mainFrame.AnchorPoint = Vector2.new(0.5, 0.5)
+    mainFrame.Position = UDim2.new(0.5, 0, 0.5, 0)
+    mainFrame.Size = mobileMode and UDim2.new(0, 480, 0, 320) or UDim2.new(0, 600, 0, 360)
+    mainFrame.ClipsDescendants = true
+    mainFrame.BorderSizePixel = 0
+    mainFrame.Parent = screenGui
+    makeCorner(mainFrame, 18)
+
+    local mainGradient = makeGradient(mainFrame, 135)
+
+    local glassOverlay = Instance.new("Frame")
+    glassOverlay.Size = UDim2.new(1, 0, 0.45, 0)
+    glassOverlay.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    glassOverlay.BorderSizePixel = 0
+    glassOverlay.ZIndex = 0 
+    glassOverlay.Parent = mainFrame
+    makeCorner(glassOverlay, 18)
+    local glassOverlayGradient = makeGradient(glassOverlay, 90)
+    glassOverlayGradient.Transparency = NumberSequence.new{
+        NumberSequenceKeypoint.new(0, 0.92),
+        NumberSequenceKeypoint.new(1, 1)
+    }
+
+    local mainStroke = Instance.new("UIStroke")
+    mainStroke.Thickness = 1.3
+    mainStroke.Parent = mainFrame
+
+    local innerLight = Instance.new("Frame")
+    innerLight.BackgroundTransparency = 1
+    innerLight.Size = UDim2.new(1, -2, 1, -2)
+    innerLight.Position = UDim2.new(0, 1, 0, 1)
+    innerLight.BorderSizePixel = 0
+    innerLight.Parent = mainFrame
+    makeCorner(innerLight, 17)
+
+    local innerGradient = makeGradient(innerLight, 90)
+    innerGradient.Transparency = NumberSequence.new{
+        NumberSequenceKeypoint.new(0, 0.72),
+        NumberSequenceKeypoint.new(0.45, 0.9),
+        NumberSequenceKeypoint.new(1, 1)
+    }
+
+    local titleBar = Instance.new("Frame")
+    titleBar.Name = "TitleBar"
+    titleBar.Parent = mainFrame
+    titleBar.Size = UDim2.new(1, 0, 0, 48)
+    titleBar.BorderSizePixel = 0
+    makeCorner(titleBar, 18)
+
+    local titleFix = Instance.new("Frame")
+    titleFix.Parent = titleBar
+    titleFix.BorderSizePixel = 0
+    titleFix.Size = UDim2.new(1, 0, 0, 18)
+    titleFix.Position = UDim2.new(0, 0, 1, -18)
+    local topGradient = makeGradient(titleBar, 0)
+
+    local title = Instance.new("TextLabel")
+    title.Parent = titleBar
+    title.BackgroundTransparency = 1
+    title.Position = UDim2.new(0, 14, 0, 11)
+    title.Size = UDim2.new(1, -120, 0, 22)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 18
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Text = "Syntax Hub"
+
+    local toggleButton = Instance.new("TextButton")
+    toggleButton.Name = "ToggleButton"
+    toggleButton.Parent = screenGui
+    toggleButton.Size = mobileMode and UDim2.new(0, 130, 0, 50) or UDim2.new(0, 120, 0, 44)
+    toggleButton.Position = UDim2.new(0, 20, 0.5, -22)
+    toggleButton.BorderSizePixel = 0
+    toggleButton.Text = "Syntax"
+    toggleButton.TextSize = 15
+    toggleButton.Font = Enum.Font.GothamBold
+    toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+    toggleButton.AutoButtonColor = false
+    makeCorner(toggleButton, 12)
+
+    local toggleGradient = makeGradient(toggleButton, 135)
+    local toggleStroke = Instance.new("UIStroke")
+    toggleStroke.Thickness = 1.1
+    toggleStroke.Parent = toggleButton
+
+    local sidebar = Instance.new("Frame")
+    sidebar.Parent = mainFrame
+    sidebar.BorderSizePixel = 0
+    sidebar.Position = UDim2.new(0, 10, 0, 62)
+    sidebar.Size = mobileMode and UDim2.new(0, 145, 1, -72) or UDim2.new(0, 150, 1, -72)
+    makeCorner(sidebar, 14)
+
+    local sidebarGradient = makeGradient(sidebar, 135)
+    local sidebarStroke = Instance.new("UIStroke")
+    sidebarStroke.Thickness = 1
+    sidebarStroke.Parent = sidebar
+
+    local sidebarPadding = Instance.new("UIPadding")
+    sidebarPadding.Parent = sidebar
+    sidebarPadding.PaddingTop = UDim.new(0, 10)
+    sidebarPadding.PaddingLeft = UDim.new(0, 10)
+    sidebarPadding.PaddingRight = UDim.new(0, 10)
+
+    local sidebarLayout = Instance.new("UIListLayout")
+    sidebarLayout.Parent = sidebar
+    sidebarLayout.Padding = UDim.new(0, 8)
+    sidebarLayout.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local contentFrame = Instance.new("Frame")
+    contentFrame.Parent = mainFrame
+    contentFrame.BorderSizePixel = 0
+    contentFrame.Position = mobileMode and UDim2.new(0, 163, 0, 62) or UDim2.new(0, 170, 0, 62)
+    contentFrame.Size = mobileMode and UDim2.new(1, -173, 1, -72) or UDim2.new(1, -180, 1, -72)
+    makeCorner(contentFrame, 14)
+
+    local contentGradient = makeGradient(contentFrame, 135)
+    local contentStroke = Instance.new("UIStroke")
+    contentStroke.Thickness = 1
+    contentStroke.Parent = contentFrame
+
+    local pageTitle = Instance.new("TextLabel")
+    pageTitle.Parent = contentFrame
+    pageTitle.BackgroundTransparency = 1
+    pageTitle.Position = UDim2.new(0, 14, 0, 17)
+    pageTitle.Size = UDim2.new(1, -28, 0, 26)
+    pageTitle.Font = Enum.Font.GothamBold
+    pageTitle.TextSize = 18
+    pageTitle.TextXAlignment = Enum.TextXAlignment.Left
+    pageTitle.Text = ""
+
+    local titleUnderline = Instance.new("Frame")
+    titleUnderline.Parent = contentFrame
+    titleUnderline.Size = UDim2.new(0, 32, 0, 3)
+    titleUnderline.Position = UDim2.new(0, 14, 0, 42)
+    titleUnderline.BorderSizePixel = 0
+    makeCorner(titleUnderline, 2)
+
+    local pagesHolder = Instance.new("Frame")
+    pagesHolder.Parent = contentFrame
+    pagesHolder.BackgroundTransparency = 1
+    pagesHolder.Position = UDim2.new(0, 12, 0, 64)
+    pagesHolder.Size = UDim2.new(1, -24, 1, -76)
+
+    -- PAGE 1: FARM PAGE
+    local puzzlesPage = Instance.new("Frame")
+    puzzlesPage.Name = "PuzzlesPage"
+    puzzlesPage.Parent = pagesHolder
+    puzzlesPage.Size = UDim2.new(1, 0, 1, 0)
+    puzzlesPage.BackgroundTransparency = 1
+    puzzlesPage.Visible = false
+
+    local autoGenBtn = Instance.new("TextButton")
+    autoGenBtn.Parent = puzzlesPage
+    autoGenBtn.Size = UDim2.new(0, 120, 0, 42)
+    autoGenBtn.Position = UDim2.new(0, 10, 0, 10)
+    autoGenBtn.Font = Enum.Font.GothamBold
+    autoGenBtn.TextSize = 12
+    autoGenBtn.Text = "AUTO GEN"
+    autoGenBtn.AutoButtonColor = false
+    makeCorner(autoGenBtn, 8)
+    local autoGenGrad = makeGradient(autoGenBtn, 135)
+    local autoGenStroke = Instance.new("UIStroke", autoGenBtn)
+    autoGenStroke.Thickness = 1
+
+    local autoBatteryBtn = Instance.new("TextButton")
+    autoBatteryBtn.Parent = puzzlesPage
+    autoBatteryBtn.Size = UDim2.new(0, 120, 0, 42)
+    autoBatteryBtn.Position = UDim2.new(0, 140, 0, 10)
+    autoBatteryBtn.Font = Enum.Font.GothamBold
+    autoBatteryBtn.TextSize = 12
+    autoBatteryBtn.Text = "AUTO BATTERY"
+    autoBatteryBtn.AutoButtonColor = false
+    makeCorner(autoBatteryBtn, 8)
+    local autoBatteryGrad = makeGradient(autoBatteryBtn, 135)
+    local autoBatteryStroke = Instance.new("UIStroke", autoBatteryBtn)
+    autoBatteryStroke.Thickness = 1
+
+    -- PAGE 2: PLACEHOLDER (ESP) PAGE - NOW A SCROLLING FRAME
+    local placeholderPage = Instance.new("ScrollingFrame")
+    placeholderPage.Name = "PlaceholderPage"
+    placeholderPage.Parent = pagesHolder
+    placeholderPage.Size = UDim2.new(1, 0, 1, 0)
+    placeholderPage.BackgroundTransparency = 1
+    placeholderPage.BorderSizePixel = 0
+    placeholderPage.ScrollBarThickness = 4
+    placeholderPage.CanvasSize = UDim2.new(0, 0, 0, 270) -- Prevents overlapping!
+    placeholderPage.Visible = false
+
+    local function createESPToggle(name, posX, posY)
+        local btn = Instance.new("TextButton")
+        btn.Parent = placeholderPage
+        btn.Size = UDim2.new(0, 120, 0, 42)
+        btn.Position = UDim2.new(0, posX, 0, posY)
+        btn.Font = Enum.Font.GothamBold
+        btn.TextSize = 12
+        btn.Text = "ESP " .. string.upper(name)
+        btn.AutoButtonColor = false
+        makeCorner(btn, 8)
+        local grad = makeGradient(btn, 135)
+        local stroke = Instance.new("UIStroke", btn)
+        stroke.Thickness = 1
+        return btn, grad, stroke
+    end
+
+    local espKillerBtn, espKillerGrad, espKillerStroke = createESPToggle("Killer", 10, 10)
+    local espGenBtn, espGenGrad, espGenStroke = createESPToggle("Generator", 140, 10)
+    local espBatBtn, espBatGrad, espBatStroke = createESPToggle("Battery", 10, 60)
+    local espFuseBtn, espFuseGrad, espFuseStroke = createESPToggle("Fusebox", 140, 60)
+    local espDoorBtn, espDoorGrad, espDoorStroke = createESPToggle("Doors", 10, 110)
+
+    local machineBypassBtn = Instance.new("TextButton")
+    machineBypassBtn.Parent = placeholderPage
+    machineBypassBtn.Size = UDim2.new(0, 120, 0, 42)
+    machineBypassBtn.Position = UDim2.new(0, 140, 0, 110)
+    machineBypassBtn.Font = Enum.Font.GothamBold
+    machineBypassBtn.TextSize = 11
+    machineBypassBtn.Text = "MACHINE BYPASS"
+    machineBypassBtn.AutoButtonColor = false
+    makeCorner(machineBypassBtn, 8)
+    local machineBypassGrad = makeGradient(machineBypassBtn, 135)
+    local machineBypassStroke = Instance.new("UIStroke", machineBypassBtn)
+    machineBypassStroke.Thickness = 1
+    
+    local infStaminaBtn = Instance.new("TextButton")
+    infStaminaBtn.Parent = placeholderPage
+    infStaminaBtn.Size = UDim2.new(0, 120, 0, 42)
+    infStaminaBtn.Position = UDim2.new(0, 10, 0, 160)
+    infStaminaBtn.Font = Enum.Font.GothamBold
+    infStaminaBtn.TextSize = 11
+    infStaminaBtn.Text = "INF STAMINA"
+    infStaminaBtn.AutoButtonColor = false
+    makeCorner(infStaminaBtn, 8)
+    local infStaminaGrad = makeGradient(infStaminaBtn, 135)
+    local infStaminaStroke = Instance.new("UIStroke", infStaminaBtn)
+    infStaminaStroke.Thickness = 1
+
+    local espAllBtn = Instance.new("TextButton")
+    espAllBtn.Parent = placeholderPage
+    espAllBtn.Size = UDim2.new(0, 250, 0, 42)
+    espAllBtn.Position = UDim2.new(0, 10, 0, 210)
+    espAllBtn.Font = Enum.Font.GothamBold
+    espAllBtn.TextSize = 13
+    espAllBtn.Text = "TURN ON ALL ESP"
+    espAllBtn.AutoButtonColor = false
+    makeCorner(espAllBtn, 8)
+    local espAllGrad = makeGradient(espAllBtn, 135)
+    local espAllStroke = Instance.new("UIStroke", espAllBtn)
+    espAllStroke.Thickness = 1
+
+    local GREEN_ACTIVE = Color3.fromRGB(38, 155, 65)
+
+    updateToggleBtns = function()
+        if getgenv().AutoGenEnabled then
+            getgenv().MachineBypassEnabled = true
+        end
+
+        autoGenGrad.Color = currentTheme.Button
+        autoBatteryGrad.Color = currentTheme.Button
+        autoGenBtn.Text = "AUTO GEN"
+        autoBatteryBtn.Text = "AUTO BATTERY"
+        
+        espKillerGrad.Color = currentTheme.Button
+        espGenGrad.Color = currentTheme.Button
+        espBatGrad.Color = currentTheme.Button
+        espFuseGrad.Color = currentTheme.Button
+        espDoorGrad.Color = currentTheme.Button
+        machineBypassGrad.Color = currentTheme.Button
+        infStaminaGrad.Color = currentTheme.Button
+        espAllGrad.Color = currentTheme.Button
+        
+        espKillerBtn.Text = "ESP KILLER"
+        espGenBtn.Text = "ESP GENERATOR"
+        espBatBtn.Text = "ESP BATTERY"
+        espFuseBtn.Text = "ESP FUSEBOX"
+        espDoorBtn.Text = "ESP DOORS"
+        machineBypassBtn.Text = "MACHINE BYPASS"
+        infStaminaBtn.Text = "INF STAMINA"
+        espAllBtn.Text = "TURN ON ALL ESP"
+        
+        if getgenv().AutoGenEnabled then
+            autoGenGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+            autoGenBtn.Text = "AUTO GEN ●"
+        end
+        if getgenv().AutoBatteryEnabled then
+            autoBatteryGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+            autoBatteryBtn.Text = "AUTO BATTERY ●"
+        end
+        
+        if getgenv().MachineBypassEnabled then
+            machineBypassGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+            machineBypassBtn.Text = "MACHINE BYPASS ●"
+        end
+        
+        if getgenv().InfiniteStamina then
+            infStaminaGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+            infStaminaBtn.Text = "INF STAMINA ●"
+        end
+        
+        if getgenv().ESPToggles.Killer then espKillerGrad.Color = ColorSequence.new(GREEN_ACTIVE); espKillerBtn.Text = "ESP KILLER ●" end
+        if getgenv().ESPToggles.Generator then espGenGrad.Color = ColorSequence.new(GREEN_ACTIVE); espGenBtn.Text = "ESP GENERATOR ●" end
+        if getgenv().ESPToggles.Battery then espBatGrad.Color = ColorSequence.new(GREEN_ACTIVE); espBatBtn.Text = "ESP BATTERY ●" end
+        if getgenv().ESPToggles.Fusebox then espFuseGrad.Color = ColorSequence.new(GREEN_ACTIVE); espFuseBtn.Text = "ESP FUSEBOX ●" end
+        if getgenv().ESPToggles.Doors then espDoorGrad.Color = ColorSequence.new(GREEN_ACTIVE); espDoorBtn.Text = "ESP DOORS ●" end
+        
+        if getgenv().ESPToggles.Killer and getgenv().ESPToggles.Generator and getgenv().ESPToggles.Battery and getgenv().ESPToggles.Fusebox and getgenv().ESPToggles.Doors then
+            espAllGrad.Color = ColorSequence.new(GREEN_ACTIVE)
+            espAllBtn.Text = "TURN OFF ALL ESP"
+        end
+    end
+
+    autoGenBtn.MouseButton1Click:Connect(function()
+        getgenv().AutoGenEnabled = not getgenv().AutoGenEnabled
+        if getgenv().AutoGenEnabled then
+            getgenv().MachineBypassEnabled = true
+        end
+        updateToggleBtns()
+        if not getgenv().AutoGenEnabled and not getgenv().AutoBatteryEnabled then cleanupPuzzles() end
+    end)
+
+    autoBatteryBtn.MouseButton1Click:Connect(function()
+        getgenv().AutoBatteryEnabled = not getgenv().AutoBatteryEnabled
+        updateToggleBtns()
+        if not getgenv().AutoGenEnabled and not getgenv().AutoBatteryEnabled then cleanupPuzzles() end
+    end)
+
+    machineBypassBtn.MouseButton1Click:Connect(function()
+        if getgenv().AutoGenEnabled then return end
+        getgenv().MachineBypassEnabled = not getgenv().MachineBypassEnabled
+        updateToggleBtns()
+    end)
+    
+    infStaminaBtn.MouseButton1Click:Connect(function()
+        getgenv().InfiniteStamina = not getgenv().InfiniteStamina
+        updateToggleBtns()
+    end)
+
+    espKillerBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Killer = not getgenv().ESPToggles.Killer; updateToggleBtns() end)
+    espGenBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Generator = not getgenv().ESPToggles.Generator; updateToggleBtns() end)
+    espBatBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Battery = not getgenv().ESPToggles.Battery; updateToggleBtns() end)
+    espFuseBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Fusebox = not getgenv().ESPToggles.Fusebox; updateToggleBtns() end)
+    espDoorBtn.MouseButton1Click:Connect(function() getgenv().ESPToggles.Doors = not getgenv().ESPToggles.Doors; updateToggleBtns() end)
+
+    espAllBtn.MouseButton1Click:Connect(function()
+        local state = not (getgenv().ESPToggles.Killer and getgenv().ESPToggles.Generator and getgenv().ESPToggles.Battery and getgenv().ESPToggles.Fusebox and getgenv().ESPToggles.Doors)
+        getgenv().ESPToggles.Killer = state
+        getgenv().ESPToggles.Generator = state
+        getgenv().ESPToggles.Battery = state
+        getgenv().ESPToggles.Fusebox = state
+        getgenv().ESPToggles.Doors = state
+        updateToggleBtns()
+    end)
+
+    -- PAGE 3: SETTINGS PAGE
+    local themePage = Instance.new("Frame")
+    themePage.Name = "ThemePage"
+    themePage.Parent = pagesHolder
+    themePage.Size = UDim2.new(1, 0, 1, 0)
+    themePage.BackgroundTransparency = 1
+    themePage.Visible = false
+
+    local themeScroll = Instance.new("ScrollingFrame")
+    themeScroll.Parent = themePage
+    themeScroll.Position = UDim2.new(0, 0, 0, 0)
+    themeScroll.Size = UDim2.new(1, 0, 1, -100)
+    themeScroll.BackgroundTransparency = 1
+    themeScroll.BorderSizePixel = 0
+    themeScroll.ScrollBarThickness = 4
+    themeScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    themeScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+
+    local themeGrid = Instance.new("UIGridLayout")
+    themeGrid.Parent = themeScroll
+    themeGrid.CellPadding = UDim2.new(0, 8, 0, 8)
+    themeGrid.CellSize = UDim2.new(0.5, -4, 0, 34) 
+    themeGrid.SortOrder = Enum.SortOrder.LayoutOrder
+
+    local sliderContainer = Instance.new("Frame")
+    sliderContainer.Parent = themePage
+    sliderContainer.Position = UDim2.new(0, 0, 1, -90)
+    sliderContainer.Size = UDim2.new(1, 0, 0, 44)
+    sliderContainer.BorderSizePixel = 0
+    makeCorner(sliderContainer, 12)
+    local sliderGradient = makeGradient(sliderContainer, 135)
+    local sliderStroke = Instance.new("UIStroke")
+    sliderStroke.Thickness = 1
+    sliderStroke.Parent = sliderContainer
+
+    local sliderTitle = Instance.new("TextLabel")
+    sliderTitle.Parent = sliderContainer
+    sliderTitle.BackgroundTransparency = 1
+    sliderTitle.Position = UDim2.new(0, 10, 0, 4)
+    sliderTitle.Size = UDim2.new(1, -20, 0, 16)
+    sliderTitle.Font = Enum.Font.GothamMedium
+    sliderTitle.TextSize = 13
+    sliderTitle.TextXAlignment = Enum.TextXAlignment.Left
+    sliderTitle.Text = "Transparency: 0%"
+
+    local sliderTrack = Instance.new("Frame")
+    sliderTrack.Parent = sliderContainer
+    sliderTrack.BackgroundColor3 = Color3.fromRGB(40, 40, 50) 
+    sliderTrack.BorderSizePixel = 0
+    sliderTrack.Position = UDim2.new(0, 10, 0, 26)
+    sliderTrack.Size = UDim2.new(1, -20, 0, 6)
+    makeCorner(sliderTrack, 3)
+
+    local sliderFill = Instance.new("Frame")
+    sliderFill.Parent = sliderTrack
+    sliderFill.BorderSizePixel = 0
+    sliderFill.Size = UDim2.new(0, 0, 1, 0)
+    makeCorner(sliderFill, 3)
+
+    local sliderKnob = Instance.new("TextButton")
+    sliderKnob.Parent = sliderTrack
+    sliderKnob.Text = ""
+    sliderKnob.AutoButtonColor = false
+    sliderKnob.BorderSizePixel = 0
+    sliderKnob.Size = UDim2.new(0, 14, 0, 14)
+    sliderKnob.Position = UDim2.new(0, -7, 0.5, -7)
+    makeCorner(sliderKnob, 7)
+
+    local preview = Instance.new("Frame")
+    preview.Parent = themePage
+    preview.Position = UDim2.new(0, 0, 1, -38)
+    preview.Size = UDim2.new(1, 0, 0, 38)
+    preview.BorderSizePixel = 0
+    makeCorner(preview, 12)
+
+    local previewGradient = makeGradient(preview, 135)
+    local previewStroke = Instance.new("UIStroke")
+    previewStroke.Thickness = 1.1
+    previewStroke.Parent = preview
+
+    local previewLabel = Instance.new("TextLabel")
+    previewLabel.Parent = preview
+    previewLabel.BackgroundTransparency = 1
+    previewLabel.Position = UDim2.new(0, 10, 0, 0)
+    previewLabel.Size = UDim2.new(1, -20, 1, 0)
+    previewLabel.Font = Enum.Font.GothamMedium
+    previewLabel.TextSize = 14
+    previewLabel.TextXAlignment = Enum.TextXAlignment.Left
+    previewLabel.Text = "Current Theme: Sapphire"
+
+    local categoryButtons = {}
+    local themeButtons = {}
+
+    local categories = {
+        {Name = "Main", Page = puzzlesPage, Title = "Farm"},
+        {Name = "PlaceHolder", Page = placeholderPage, Title = "ESP Controls"},
+        {Name = "Settings", Page = themePage, Title = "Settings"}
+    }
+
+    local function applyGlobalTransparency(val)
+        val = math.clamp(val, 0, 100)
+        local alpha = val / 100
+        
+        sliderTitle.Text = "Transparency: " .. math.floor(val) .. "%"
+        sliderFill.Size = UDim2.new(alpha, 0, 1, 0)
+        sliderKnob.Position = UDim2.new(alpha, -7, 0.5, -7)
+
+        local function setTrans(inst)
+            if inst:IsA("GuiObject") then
+                if inst:GetAttribute("OrigBg") == nil then inst:SetAttribute("OrigBg", inst.BackgroundTransparency) end
+                inst.BackgroundTransparency = inst:GetAttribute("OrigBg") + ((1 - inst:GetAttribute("OrigBg")) * (alpha * 0.90))
+            end
+            if inst:IsA("TextLabel") or inst:IsA("TextButton") or inst:IsA("TextBox") then
+                if inst:GetAttribute("OrigTxt") == nil then inst:SetAttribute("OrigTxt", inst.TextTransparency) end
+                inst.TextTransparency = inst:GetAttribute("OrigTxt") + ((1 - inst:GetAttribute("OrigTxt")) * (alpha * 0.2))
+            end
+            if inst:IsA("UIStroke") then
+                if inst:GetAttribute("OrigStr") == nil then inst:SetAttribute("OrigStr", inst.Transparency) end
+                inst.Transparency = inst:GetAttribute("OrigStr") + ((1 - inst:GetAttribute("OrigStr")) * (alpha * 0.4))
+            end
+        end
+
+        setTrans(mainFrame)
+        for _, child in ipairs(mainFrame:GetDescendants()) do setTrans(child) end
+    end
+
+    local draggingSlider = false
+    sliderKnob.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then draggingSlider = true end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then draggingSlider = false end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local relativeX = math.clamp(input.Position.X - sliderTrack.AbsolutePosition.X, 0, sliderTrack.AbsoluteSize.X)
+            local percentage = relativeX / sliderTrack.AbsoluteSize.X
+            applyGlobalTransparency(percentage * 100)
+        end
+    end)
+
+    local function createCategoryButton(data, index)
+        local button = Instance.new("TextButton")
+        button.Parent = sidebar; button.Size = UDim2.new(1, 0, 0, 40); button.BorderSizePixel = 0; button.Text = ""; button.AutoButtonColor = false; button.LayoutOrder = index
+        makeCorner(button, 12)
+        local gradient = makeGradient(button, 135); local stroke = Instance.new("UIStroke"); stroke.Thickness = 1; stroke.Parent = button
+        local indicator = Instance.new("Frame"); indicator.Size = UDim2.new(0, 0, 0, 18); indicator.Position = UDim2.new(0, 4, 0.5, -9); indicator.BorderSizePixel = 0; indicator.Parent = button; makeCorner(indicator, 4)
+        local label = Instance.new("TextLabel"); label.Parent = button; label.BackgroundTransparency = 1; label.Position = UDim2.new(0, 14, 0, 12); label.Size = UDim2.new(1, -20, 0, 16); label.Font = Enum.Font.GothamBold; label.TextSize = 13; label.TextXAlignment = Enum.TextXAlignment.Left; label.Text = data.Name
+        categoryButtons[index] = {Button = button, Gradient = gradient, Stroke = stroke, Label = label, Indicator = indicator}
+        return button
+    end
+
+    local function createThemeButton(themeName)
+        local themeData = Themes[themeName]
+        local button = Instance.new("TextButton"); button.Name = themeName .. "Button"; button.Text = themeName; button.Font = Enum.Font.GothamSemibold; button.TextSize = 13; button.AutoButtonColor = false; button.BorderSizePixel = 0; button.TextXAlignment = Enum.TextXAlignment.Left; button.Parent = themeScroll
+        makeCorner(button, 10)
+        local padding = Instance.new("UIPadding"); padding.PaddingLeft = UDim.new(0, 36); padding.Parent = button
+        local colorTint = Instance.new("Frame"); colorTint.Size = UDim2.new(1, 0, 1, 0); colorTint.BackgroundColor3 = themeData.Accent; colorTint.BackgroundTransparency = 0.88; colorTint.BorderSizePixel = 0; colorTint.Parent = button; makeCorner(colorTint, 10)
+        local dot = Instance.new("Frame"); dot.Size = UDim2.new(0, 12, 0, 12); dot.Position = UDim2.new(0, -23, 0.5, -6); dot.BackgroundColor3 = themeData.Main.Keypoints[#themeData.Main.Keypoints].Value; dot.BorderSizePixel = 0; dot.Parent = button; makeCorner(dot, 6)
+        local dotUIStroke = Instance.new("UIStroke"); dotUIStroke.Color = themeData.Accent; dotUIStroke.Thickness = 1.5; dotUIStroke.Parent = dot
+        local gradient = makeGradient(button, 135); local stroke = Instance.new("UIStroke"); stroke.Thickness = 1; stroke.Parent = button
+        themeButtons[themeName] = {Button = button, Gradient = gradient, Stroke = stroke, Padding = padding, DotStroke = dotUIStroke, Tint = colorTint}
+        return button
+    end
+
+    for i, data in ipairs(categories) do createCategoryButton(data, i) end
+    for themeName in pairs(Themes) do createThemeButton(themeName) end
+
+    local selectedCategory = 1
+    local function setCategoryVisual(index, hovering)
+        local data = categoryButtons[index]
+        if not data then return end
+        if selectedCategory == index then
+            data.Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, currentTheme.Accent), ColorSequenceKeypoint.new(1, currentTheme.Accent2)}
+            data.Stroke.Color = currentTheme.Accent2; data.Label.TextColor3 = Color3.fromRGB(255, 255, 255); data.Indicator.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+            tweenObject(data.Indicator, tweenFast, {Size = UDim2.new(0, 4, 0, 18)}); tweenObject(data.Label, tweenFast, {Position = UDim2.new(0, 18, 0, 12)})
+        else
+            data.Gradient.Color = hovering and currentTheme.ButtonHover or currentTheme.Button; data.Stroke.Color = currentTheme.Stroke; data.Label.TextColor3 = currentTheme.Text
+            tweenObject(data.Indicator, tweenFast, {Size = UDim2.new(0, 0, 0, 18)}); tweenObject(data.Label, tweenFast, {Position = UDim2.new(0, 14, 0, 12)})
+        end
+    end
+
+    local function setThemeButtonVisual(selectedThemeName, buttonName, hovering)
+        local selectedThemeData = Themes[selectedThemeName]; local btnData = themeButtons[buttonName]
+        if not btnData then return end
+        if selectedThemeName == buttonName then
+            btnData.Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, selectedThemeData.Accent), ColorSequenceKeypoint.new(1, selectedThemeData.Accent2)}
+            btnData.Stroke.Color = selectedThemeData.Accent2; btnData.Button.TextColor3 = Color3.fromRGB(255, 255, 255); btnData.DotStroke.Color = Color3.fromRGB(255, 255, 255); btnData.Tint.BackgroundTransparency = 0.5 
+        else
+            btnData.Gradient.Color = hovering and selectedThemeData.ButtonHover or selectedThemeData.Button; btnData.Stroke.Color = selectedThemeData.Stroke; btnData.Button.TextColor3 = selectedThemeData.Text; btnData.DotStroke.Color = Themes[buttonName].Accent; btnData.Tint.BackgroundTransparency = 0.88 
+        end
+    end
+
+    local function switchCategory(index)
+        selectedCategory = index
+        for i, data in ipairs(categories) do data.Page.Visible = (i == index); setCategoryVisual(i, false) end
+        pageTitle.Text = categories[index].Title; RunService.RenderStepped:Wait()
+        local titleWidth = pageTitle.TextBounds.X; titleUnderline.Size = UDim2.new(0, 0, 0, 3)
+        tweenObject(titleUnderline, TweenInfo.new(0.4, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), {Size = UDim2.new(0, titleWidth, 0, 3)})
+    end
+
+    local function applyTheme(themeName)
+        local theme = Themes[themeName]
+        if not theme then return end
+
+        currentThemeName = themeName; currentTheme = theme
+        
+        mainGradient.Color = theme.Main; topGradient.Color = theme.Topbar; titleFix.BackgroundColor3 = theme.Topbar.Keypoints[#theme.Topbar.Keypoints].Value; sidebarGradient.Color = theme.Main; contentGradient.Color = theme.Main; mainStroke.Color = theme.Stroke; sidebarStroke.Color = theme.Stroke; contentStroke.Color = theme.Stroke; toggleGradient.Color = theme.Button; toggleStroke.Color = theme.Stroke; titleUnderline.BackgroundColor3 = theme.Accent; innerGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent2), ColorSequenceKeypoint.new(1, theme.Accent)}
+        title.TextColor3 = theme.Text; pageTitle.TextColor3 = theme.Text; previewLabel.TextColor3 = theme.Text; toggleButton.TextColor3 = theme.Text; sliderGradient.Color = theme.Topbar; sliderStroke.Color = theme.Stroke; sliderTitle.TextColor3 = theme.Text; sliderFill.BackgroundColor3 = theme.Accent; sliderKnob.BackgroundColor3 = theme.Text
+        
+        if not getgenv().AutoGenEnabled then autoGenGrad.Color = theme.Button end
+        if not getgenv().AutoBatteryEnabled then autoBatteryGrad.Color = theme.Button end
+        if not getgenv().MachineBypassEnabled then machineBypassGrad.Color = theme.Button end
+        if not getgenv().InfiniteStamina then infStaminaGrad.Color = theme.Button end
+        if not getgenv().ESPToggles.Killer then espKillerGrad.Color = theme.Button end
+        if not getgenv().ESPToggles.Generator then espGenGrad.Color = theme.Button end
+        if not getgenv().ESPToggles.Battery then espBatGrad.Color = theme.Button end
+        if not getgenv().ESPToggles.Fusebox then espFuseGrad.Color = theme.Button end
+        if not getgenv().ESPToggles.Doors then espDoorGrad.Color = theme.Button end
+        if not (getgenv().ESPToggles.Killer and getgenv().ESPToggles.Generator and getgenv().ESPToggles.Battery and getgenv().ESPToggles.Fusebox and getgenv().ESPToggles.Doors) then espAllGrad.Color = theme.Button end
+        
+        autoGenStroke.Color = theme.Stroke; autoBatteryStroke.Color = theme.Stroke
+        espKillerStroke.Color = theme.Stroke; espGenStroke.Color = theme.Stroke; espBatStroke.Color = theme.Stroke; espFuseStroke.Color = theme.Stroke; espDoorStroke.Color = theme.Stroke; espAllStroke.Color = theme.Stroke; machineBypassStroke.Color = theme.Stroke; infStaminaStroke.Color = theme.Stroke
+        
+        autoGenBtn.TextColor3 = theme.Text; autoBatteryBtn.TextColor3 = theme.Text; machineBypassBtn.TextColor3 = theme.Text; infStaminaBtn.TextColor3 = theme.Text
+        espKillerBtn.TextColor3 = theme.Text; espGenBtn.TextColor3 = theme.Text; espBatBtn.TextColor3 = theme.Text; espFuseBtn.TextColor3 = theme.Text; espDoorBtn.TextColor3 = theme.Text; espAllBtn.TextColor3 = theme.Text
+        
+        previewGradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Accent2)}; previewStroke.Color = theme.Accent2; previewLabel.Text = "Current Theme: " .. themeName
+        glow1Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Glow), ColorSequenceKeypoint.new(1, theme.Accent2)}; glow2Gradient.Color = ColorSequence.new{ColorSequenceKeypoint.new(0, theme.Accent), ColorSequenceKeypoint.new(1, theme.Glow)}; glow1.BackgroundColor3 = theme.Glow; glow2.BackgroundColor3 = theme.Accent
+
+        for i = 1, #categories do setCategoryVisual(i, false) end
+        for name in pairs(themeButtons) do setThemeButtonVisual(themeName, name, false) end
+        
+        local percentage = (math.clamp(tonumber(string.match(sliderTitle.Text, "%d+")) or 0, 0, 100)) / 100
+        applyGlobalTransparency(percentage * 100)
+    end
+
+    for i, data in ipairs(categoryButtons) do
+        data.Button.MouseEnter:Connect(function() setCategoryVisual(i, true) end); data.Button.MouseLeave:Connect(function() setCategoryVisual(i, false) end); data.Button.MouseButton1Click:Connect(function() switchCategory(i) end)
+    end
+    for name, data in pairs(themeButtons) do
+        data.Button.MouseEnter:Connect(function() setThemeButtonVisual(currentThemeName, name, true); tweenObject(data.Padding, tweenFast, {PaddingLeft = UDim.new(0, 42)}) end)
+        data.Button.MouseLeave:Connect(function() setThemeButtonVisual(currentThemeName, name, false); tweenObject(data.Padding, tweenFast, {PaddingLeft = UDim.new(0, 36)}) end)
+        data.Button.MouseButton1Click:Connect(function()
+            applyTheme(name); local baseSize = mobileMode and UDim2.new(0, 480, 0, 320) or UDim2.new(0, 600, 0, 360)
+            tweenObject(mainFrame, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, baseSize.X.Offset + 12, 0, baseSize.Y.Offset + 10)})
+            task.delay(0.16, function() tweenObject(mainFrame, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = baseSize}) end)
+        end)
+    end
+
+    local isOpen = true; local openSize = mainFrame.Size
+    local function openGui()
+        mainFrame.Visible = true; glowHolder.Visible = true; mainFrame.Size = UDim2.new(0, 0, 0, 0); glow1.BackgroundTransparency = 1; glow2.BackgroundTransparency = 1
+        tweenObject(mainFrame, tweenSmooth, {Size = openSize}); tweenObject(glow1, tweenSmooth, {BackgroundTransparency = 0.86}); tweenObject(glow2, tweenSmooth, {BackgroundTransparency = 0.90}); isOpen = true
+    end
+    local function closeGui()
+        local closeTween = tweenObject(mainFrame, tweenSmooth, {Size = UDim2.new(0, 0, 0, 0)}); tweenObject(glow1, tweenSmooth, {BackgroundTransparency = 1}); tweenObject(glow2, tweenSmooth, {BackgroundTransparency = 1})
+        closeTween.Completed:Connect(function() if not isOpen then mainFrame.Visible = false; glowHolder.Visible = false end end); isOpen = false
+    end
+
+    toggleButton.MouseButton1Click:Connect(function()
+        local baseSize = mobileMode and UDim2.new(0, 130, 0, 50) or UDim2.new(0, 120, 0, 44)
+        tweenObject(toggleButton, tweenFast, {Size = UDim2.new(baseSize.X.Scale, baseSize.X.Offset - 4, baseSize.Y.Scale, baseSize.Y.Offset - 4)})
+        task.delay(0.08, function() tweenObject(toggleButton, tweenFast, {Size = baseSize}) end)
+        if isOpen then closeGui() else openGui() end
+    end)
+
+    local draggingToggle, dragToggleInput, dragToggleStart, toggleStartPos = false, nil, nil, nil
+    toggleButton.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then draggingToggle = true; dragToggleStart = input.Position; toggleStartPos = toggleButton.Position; input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then draggingToggle = false end end) end
+    end)
+    toggleButton.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragToggleInput = input end end)
+    UserInputService.InputChanged:Connect(function(input) if draggingToggle and input == dragToggleInput then local delta = input.Position - dragToggleStart; toggleButton.Position = UDim2.new(toggleStartPos.X.Scale, toggleStartPos.X.Offset + delta.X, toggleStartPos.Y.Scale, toggleStartPos.Y.Offset + delta.Y) end end)
+
+    local draggingMain, dragMainStart, mainStartPos, mainDragInput = false, nil, nil, nil
+    titleBar.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then draggingMain = true; dragMainStart = input.Position; mainStartPos = mainFrame.Position; input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then draggingMain = false end end) end
+    end)
+    titleBar.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then mainDragInput = input end end)
+    UserInputService.InputChanged:Connect(function(input) if draggingMain and input == mainDragInput then local delta = input.Position - dragMainStart; mainFrame.Position = UDim2.new(mainStartPos.X.Scale, mainStartPos.X.Offset + delta.X, mainStartPos.Y.Scale, mainStartPos.Y.Offset + delta.Y); glowHolder.Position = mainFrame.Position end end)
+
+    task.spawn(function()
+        while screenGui.Parent do
+            tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.3, 0, 0.32, 0)}); tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.7, 0, 0.68, 0)}); task.wait(2.6)
+            tweenObject(glow1, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.25, 0, 0.26, 0)}); tweenObject(glow2, TweenInfo.new(2.6, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut), {Position = UDim2.new(0.76, 0, 0.74, 0)}); task.wait(2.6)
+        end
+    end)
+
+    switchCategory(1); applyTheme("Sapphire")
+
+    -- ========================================================
+    -- THE PUZZLE & ESP ENGINE (OPTIMIZED)
+    -- ========================================================
+    local function getPromptPos(prompt, obj)
+        if prompt.Parent then
+            if prompt.Parent:IsA("Attachment") then return prompt.Parent.WorldPosition end
+            if prompt.Parent:IsA("BasePart") then return prompt.Parent.Position end
+        end
+        if obj and (obj:IsA("Model") or obj:IsA("BasePart")) then return obj:GetPivot().Position end
+        return nil
+    end
+
+    local function scanForPuzzleTarget(charPos)
+        local bestPrompt, bestPos, bestDist, bestObject, targetType = nil, nil, math.huge, nil, nil
+        
+        for prompt, _ in pairs(WorldCache.Prompts) do
+            if prompt.Enabled and prompt.Parent then
+                local obj = prompt.Parent
+                if obj:IsA("Attachment") then obj = obj.Parent end
+                if obj and obj.Parent and obj.Parent:IsA("Model") then obj = obj.Parent end
+                
+                if obj and (obj:IsA("Model") or obj:IsA("BasePart")) then
+                    local pPos = getPromptPos(prompt, obj)
+                    if pPos then
+                        local dist = (charPos - pPos).Magnitude
+                        
+                        if getgenv().AutoGenEnabled and WorldCache.Generators[obj] then
+                            if dist < bestDist then bestDist = dist; bestPrompt = prompt; bestPos = pPos; bestObject = obj; targetType = "Generator" end
+                        elseif getgenv().AutoBatteryEnabled then
+                            local holdingBattery = false
+                            local c = player.Character
+                            if c then for _, child in ipairs(c:GetChildren()) do if string.find(string.lower(child.Name), "battery") then holdingBattery = true break end end end
+                            
+                            if holdingBattery and WorldCache.Fuseboxes[obj] then
+                                if dist < bestDist then bestDist = dist; bestPrompt = prompt; bestPos = pPos; bestObject = obj; targetType = "fuse" end
+                            elseif not holdingBattery and WorldCache.Batteries[obj] then
+                                if dist < bestDist then bestDist = dist; bestPrompt = prompt; bestPos = pPos; bestObject = obj; targetType = "batter" end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return bestPrompt, bestPos, bestObject, targetType
+    end
+
+    local function fireAllPromptsNear(charPos, radius)
+        if not fireproximityprompt then return end
+        for prompt, _ in pairs(WorldCache.Prompts) do
+            if prompt.Enabled then
+                local pPos = getPromptPos(prompt, prompt.Parent)
+                if pPos and (charPos - pPos).Magnitude <= radius then 
+                    prompt.MaxActivationDistance = 100 
+                    prompt.RequiresLineOfSight = false
+                    fireproximityprompt(prompt)
+                end
+            end
+        end
+    end
+
+    getgenv().MyAutoGenLoop = task.spawn(function()
+        local function safeLerp(hrp, hum, startPos, endPos, speed)
+            local dist = (startPos - endPos).Magnitude
+            if dist < 0.5 then return true end
+            local timeToTravel = dist / speed
+            local bv = hrp:FindFirstChild("SafeHover") or Instance.new("BodyVelocity")
+            bv.Name = "SafeHover"; bv.Velocity = Vector3.zero; bv.MaxForce = Vector3.new(1e5, 1e5, 1e5); bv.Parent = hrp
+            hum.PlatformStand = true; hrp.Anchored = false 
+            
+            local startTime = os.clock(); local connection; local success = true
+            connection = RunService.Heartbeat:Connect(function()
+                if not (getgenv().AutoGenEnabled or getgenv().AutoBatteryEnabled) or hum.Health <= 0 or not hrp.Parent then
+                    success = false; connection:Disconnect(); return
+                end
+                local alpha = math.clamp((os.clock() - startTime) / timeToTravel, 0, 1)
+                hrp.CFrame = CFrame.new(startPos:Lerp(endPos, alpha)); hrp.Velocity = Vector3.zero 
+                if alpha >= 1 then connection:Disconnect() end
+            end)
+            while connection.Connected do task.wait() end
+            if bv then bv:Destroy() end
+            return success
+        end
+
+        while true do
+            task.wait(0.2) 
+            pcall(function()
+                if (getgenv().AutoGenEnabled or getgenv().AutoBatteryEnabled) then
+                    local char = player.Character
+                    if not char or not char.Parent then return end 
+                    local hrp = char:FindFirstChild("HumanoidRootPart")
+                    local hum = char:FindFirstChild("Humanoid")
+                    
+                    if hrp and hum and hum.Health > 0 then
+                        if isInPuzzleSafeZone(hrp.Position) then cleanupPuzzles(); getgenv().IsUnderground = false; return end
+                        
+                        if not getgenv().NoclipConnection then
+                            getgenv().NoclipConnection = RunService.Stepped:Connect(function()
+                                if player.Character then for _, part in ipairs(player.Character:GetDescendants()) do if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end end end
+                            end)
+                        end
+
+                        local nearestPrompt, targetPosition, targetObject, targetType = scanForPuzzleTarget(hrp.Position)
+                        if not nearestPrompt then cleanupPuzzles(); return end
+                        
+                        local surfacePos = targetPosition + Vector3.new(0, 3, 0) 
+                        local underPos = targetPosition - Vector3.new(0, 15, 0)
+                        local horizontalDistance = (Vector3.new(hrp.Position.X, 0, hrp.Position.Z) - Vector3.new(underPos.X, 0, underPos.Z)).Magnitude
+                        
+                        if horizontalDistance > 5 then
+                            if not getgenv().IsUnderground then
+                                safeLerp(hrp, hum, hrp.Position, hrp.Position - Vector3.new(0, 15, 0), 50); getgenv().IsUnderground = true
+                            end
+                            if not safeLerp(hrp, hum, hrp.Position, Vector3.new(underPos.X, hrp.Position.Y, underPos.Z), 24) then return end
+                        end
+                        
+                        createVirtualPlatform(underPos)
+                        getgenv().SafeToBypass = false 
+                        
+                        hrp.CFrame = CFrame.new(surfacePos); hrp.Anchored = false; hum.PlatformStand = false; hrp.Velocity = Vector3.zero
+                        getgenv().IsUnderground = false
+                        task.wait(0.3) 
+                        
+                        local successfullyOpened = false
+                        local timeout = 0
+                        
+                        if targetType == "Generator" then
+                            while timeout < 60 do 
+                                local genUI = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("Gen")
+                                if genUI and genUI.Enabled then successfullyOpened = true; break end
+                                nearestPrompt.MaxActivationDistance = 100; nearestPrompt.RequiresLineOfSight = false
+                                if fireproximityprompt then fireproximityprompt(nearestPrompt) end
+                                fireAllPromptsNear(hrp.Position, 50)
+                                task.wait(0.05); timeout = timeout + 1
+                            end
+                        else
+                            while timeout < 20 do 
+                                nearestPrompt.MaxActivationDistance = 100; nearestPrompt.RequiresLineOfSight = false
+                                if fireproximityprompt then fireproximityprompt(nearestPrompt) end
+                                fireAllPromptsNear(hrp.Position, 50)
+                                task.wait(0.1); timeout = timeout + 1
+                            end
+                            successfullyOpened = true
+                        end
+                        
+                        if successfullyOpened then
+                            hrp.CFrame = CFrame.new(underPos); hrp.Anchored = false; getgenv().IsUnderground = true
+                            if targetType == "Generator" then
+                                getgenv().SafeToBypass = true 
+                                while (getgenv().AutoGenEnabled or getgenv().AutoBatteryEnabled) and hum.Health > 0 do
+                                    local genUI = player:FindFirstChild("PlayerGui") and player.PlayerGui:FindFirstChild("Gen")
+                                    if not genUI or not genUI.Enabled or not nearestPrompt or not nearestPrompt.Parent or not nearestPrompt.Enabled then break end
+                                    task.wait(0.1)
+                                end
+                                getgenv().SafeToBypass = false; task.wait(0.5) 
+                            else
+                                task.wait(0.5) 
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+
+    getgenv().MyBypassLoop = task.spawn(function()
+        while true do
+            task.wait(0.05) 
+            pcall(function()
+                if getgenv().SafeToBypass or getgenv().MachineBypassEnabled then 
+                    local playerGui = player:FindFirstChild("PlayerGui")
+                    if playerGui then
+                        local genUI = playerGui:FindFirstChild("Gen")
+                        if genUI and genUI.Enabled then
+                            local generatorMain = genUI:FindFirstChild("GeneratorMain")
+                            local realEvent = generatorMain and generatorMain:FindFirstChild("Event")
+                            if realEvent then
+                                local payload = {Wires = true, Switches = true, Lever = true}
+                                if realEvent:IsA("RemoteEvent") then realEvent:FireServer(payload)
+                                elseif realEvent:IsA("BindableEvent") then realEvent:Fire(payload) end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+
+    getgenv().MyESPLoop = task.spawn(function()
+        while true do
+            task.wait(1) 
+            pcall(function()
+                -- Killer ESP
+                if getgenv().ESPToggles.Killer then
+                    local killerFolder = workspace:FindFirstChild("KILLER")
+                    if killerFolder then for _, child in ipairs(killerFolder:GetChildren()) do applyHighlight(child, "KillerHighlight", KILLER_FILL) end end
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        if p == player then continue end 
+                        local isKiller = false
+                        if p.Character then for _, child in ipairs(p.Character:GetChildren()) do if string.find(string.lower(child.Name), "killer") then isKiller = true break end end end
+                        if isKiller and p.Character then applyHighlight(p.Character, "KillerHighlight", KILLER_FILL) end
+                    end
+                else
+                    clearHighlights("KillerHighlight")
+                end
+
+                -- Door ESP
+                if getgenv().ESPToggles.Doors then
+                    for obj, _ in pairs(WorldCache.Doors) do applyHighlight(obj, "DoorHighlight", DOOR_FILL) end
+                else
+                    clearHighlights("DoorHighlight")
+                end
+                
+                -- Battery ESP
+                if getgenv().ESPToggles.Battery then
+                    for obj, _ in pairs(WorldCache.Batteries) do applyHighlight(obj, "BatteryHighlight", BATTERY_FILL) end
+                else
+                    clearHighlights("BatteryHighlight")
+                end
+                
+                -- Fusebox ESP
+                if getgenv().ESPToggles.Fusebox then
+                    for obj, _ in pairs(WorldCache.Fuseboxes) do applyHighlight(obj, "FuseBoxHighlight", FUSEBOX_FILL) end
+                else
+                    clearHighlights("FuseBoxHighlight")
+                end
+
+                -- Generator ESP
+                if getgenv().ESPToggles.Generator then
+                    for obj, _ in pairs(WorldCache.Generators) do
+                        local isDone = true
+                        for _, child in ipairs(obj:GetDescendants()) do
+                            if child:IsA("ProximityPrompt") and child.Enabled then isDone = false break end
+                        end
+                        if isDone then applyHighlight(obj, "GeneratorHighlight", GENERATOR_DONE) else applyHighlight(obj, "GeneratorHighlight", GENERATOR_NOT_DONE) end
+                    end
+                else
+                    clearHighlights("GeneratorHighlight")
+                end
+            end)
+        end
+    end)
+
+    getgenv().MyStaminaLoop = task.spawn(function()
+        while true do
+            task.wait(0.5) 
+            pcall(function()
+                if getgenv().InfiniteStamina then
+                    local char = player.Character
+                    if char then
+                        local currentStamina = char:GetAttribute("Stamina")
+                        if currentStamina and currentStamina < 100 then char:SetAttribute("Stamina", 100) end
+                    end
+                end
+            end)
+        end
+    end)
+end
+
+-- ========================================================
+-- KEY SYSTEM VERIFICATION LOGIC
+-- ========================================================
+SubmitBtn.MouseButton1Click:Connect(function()
+    -- Trim whitespace in case they copy-pasted or hit spacebar by accident
+    local enteredKey = string.gsub(KeyInput.Text, "%s+", "")
+    
+    if enteredKey == "Syntaxed112" then
+        -- Success State & Animation
+        local displayName = player.DisplayName or player.Name
+        SubmitBtn.Text = "Welcome, " .. displayName .. "!"
+        SubmitBtn.BackgroundColor3 = Color3.fromRGB(38, 155, 65)
+        
+        -- Give the user a moment to read the greeting
+        task.wait(1.5)
+        
+        -- Tween UI Away
+        local fadeInfo = TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.In)
+        local frameTween = TweenService:Create(KeyFrame, fadeInfo, {Size = UDim2.new(0, 0, 0, 0), BackgroundTransparency = 1})
+        TweenService:Create(Title, fadeInfo, {TextTransparency = 1}):Play()
+        TweenService:Create(KeyInput, fadeInfo, {BackgroundTransparency = 1, TextTransparency = 1}):Play()
+        TweenService:Create(SubmitBtn, fadeInfo, {BackgroundTransparency = 1, TextTransparency = 1}):Play()
+        TweenService:Create(KeyStroke, fadeInfo, {Transparency = 1}):Play()
+        TweenService:Create(InputStroke, fadeInfo, {Transparency = 1}):Play()
+        
+        frameTween:Play()
+        frameTween.Completed:Wait()
+        
+        KeyScreen:Destroy()
+        loadMainScript()
+    else
+        SubmitBtn.Text = "Invalid Key!"
+        SubmitBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+        task.wait(1.5)
+        SubmitBtn.Text = "Verify Key"
+        SubmitBtn.BackgroundColor3 = Color3.fromRGB(42, 78, 132)
+    end
+end)
