@@ -237,3 +237,5 @@ print("✅ DECRYPTION SUCCESSFUL! Booting Syntax Hub...")
 local IllllllIlllIIlIllI, IlllllIllIIllIlllIIIllI = pcall(IlllIllIIlIlIIlIIlIIlIlIllI)
 if not IllllllIlllIIlIllI then
     warn("❌ SCRIPT ERROR: Decryption worked perfectly, but YOUR script crashed! Reason: " .. tostring(IlllllIllIIllIlllIIIllI))
+end
+
