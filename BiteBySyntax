@@ -72,7 +72,7 @@ Instance.new("UICorner", checkBtn).CornerRadius = UDim.new(0, 8)
 local discordBtn = Instance.new("TextButton", keyBg); discordBtn.Size = UDim2.new(0, 280, 0, 40); discordBtn.Position = UDim2.new(0, 20, 0, 160); discordBtn.BackgroundColor3 = Color3.fromRGB(88, 101, 242); discordBtn.TextColor3 = Color3.fromRGB(255, 255, 255); discordBtn.Font = Enum.Font.GothamBold; discordBtn.TextSize = 14; discordBtn.Text = "Join Discord"
 Instance.new("UICorner", discordBtn).CornerRadius = UDim.new(0, 8)
 
-local discordLink = "https://discord.gg/YBJTGGpG44"
+local discordLink = "https://discord.gg/DHVH8qbkkE"
 
 local Junkie = nil
 pcall(function()
