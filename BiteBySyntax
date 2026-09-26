@@ -9,11 +9,14 @@ elseif currentPlace == 98927955463992 or currentGame == 98927955463992 or curren
 elseif currentPlace == 107778070777162 or currentGame == 107778070777162 then
     scriptToLoad = "https://api.jnkie.com/api/v1/luascripts/public/095c6f058915c5ad1adcfa6c107201d18dcd4a0b3004a179bdeb85673b466d01/download"
 else
+    if setclipboard then
+        setclipboard(tostring(currentPlace))
+    end
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification", {
-            Title = "Syntax Hub",
-            Text = "game not supported",
-            Duration = 5
+            Title = "Syntax Hub - Unsupported",
+            Text = "Place: " .. tostring(currentPlace) .. " (Copied to clipboard!)",
+            Duration = 7
         })
     end)
     return 
