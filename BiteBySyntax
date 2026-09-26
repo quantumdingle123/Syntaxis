@@ -6,6 +6,8 @@ if currentPlace == 70845479499574 or currentGame == 70845479499574 then
     scriptToLoad = "https://api.jnkie.com/api/v1/luascripts/public/42035527fd272c07577ad2bed86ccdd61c429b77e77bb59963f886c7681c9f78/download"
 elseif currentPlace == 98927955463992 or currentGame == 98927955463992 or currentPlace == 114204398207377 or currentGame == 114204398207377 then
     scriptToLoad = "https://api.jnkie.com/api/v1/luascripts/public/c456c062887adc93cd47ac76ef740648d34959c92dfde983c2bf411936a353c3/download"
+elseif currentPlace == 107778070777162 or currentGame == 107778070777162 then
+    scriptToLoad = "https://api.jnkie.com/api/v1/luascripts/public/095c6f058915c5ad1adcfa6c107201d18dcd4a0b3004a179bdeb85673b466d01/download"
 else
     pcall(function()
         game:GetService("StarterGui"):SetCore("SendNotification", {
