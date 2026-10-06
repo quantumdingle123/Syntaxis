@@ -1,4 +1,4 @@
-local keyless = true
+local keyless = false
 
 local currentPlace = game.PlaceId
 local currentGame = game.GameId
