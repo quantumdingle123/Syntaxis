@@ -1,1 +1,1 @@
-https://raw.githubusercontent.com/tenobarillas-ship-it/sae/refs/heads/main/qualcom
+loadstring(game:HttpGet('https://raw.githubusercontent.com/tenobarillas-ship-it/sae/refs/heads/main/qualcom'))()
