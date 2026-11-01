@@ -135,15 +135,21 @@ local currentSettings = {
     CastLuck = "x1.5 Perfect",
     AutoBuyHalloweenEgg = false,
     AutoHalloweenSteal = false,
+    AutoPhantomExpress = false,
+    AutoSoulTrade = false,
     HalloweenTargetAreas = { ["All"] = true },
     HalloweenMinRarity = "All",
     TaskPriorities = {
         "Auto Boss",
+        "Auto Ghost Dog",
+        "Auto Phantom Express",
+        "Auto Soul Trade",
+        "Auto Steal Halloween Eggs",
         "Auto Steal",
         "Candy Cane Farm",
         "Auto Pumpkin",
+        "Auto Fishing",
         "Enchanted / Bloom Event",
-        "Auto Upgrades",
         "Auto Treadmill"
     }
 }
@@ -221,8 +227,12 @@ getgenv().config.autoGhostDog = currentSettings.AutoGhostDog == true
 getgenv().config.autoFishing = currentSettings.AutoFishing == true
 getgenv().config.castLuck = currentSettings.CastLuck or "x1.5 Perfect"
 getgenv().config.autoBuyHalloweenEgg = currentSettings.AutoBuyHalloweenEgg == true
+getgenv().config.autoPhantomExpress = currentSettings.AutoPhantomExpress == true
+getgenv().AutoPhantomExpress = getgenv().config.autoPhantomExpress
+getgenv().config.autoSoulTrade = currentSettings.AutoSoulTrade == true
+getgenv().AutoSoulTrade = getgenv().config.autoSoulTrade
 
-local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenPumpkinManager, HalloweenStealManager, HalloweenBossManager, GhostDogManager, HalloweenFishingManager, PriorityManager, getBestEgg, DynamicRarityResolver, activeTheme, Window
+local HalloweenPortalManager, HalloweenAreaManager, HalloweenCombatManager, HalloweenPumpkinManager, HalloweenStealManager, HalloweenBossManager, GhostDogManager, HalloweenFishingManager, PhantomExpressManager, PriorityManager, getBestEgg, DynamicRarityResolver, activeTheme, Window
 
 local State = {
     currentStealSession = 0,
@@ -277,7 +287,40 @@ local CONFIG = {
 local HALLOWEEN_DIM_CENTER = Vector3.new(-5808, -200, -7376)
 local HALLOWEEN_RADIUS = 2500
 
+local function isInForgottenTown()
+    local attr = LocalPlayer:GetAttribute("TrainEventPhase")
+    if attr == "Town" then
+        return true
+    end
+    local char = LocalPlayer.Character
+    if char and char:GetAttribute("TrainEventInForgottenTown") == true then
+        return true
+    end
+    if PhantomExpressManager and PhantomExpressManager.IsInTown and PhantomExpressManager:IsInTown() then
+        return true
+    end
+    return false
+end
+
+local function isAboardPhantomExpress()
+    local phase = LocalPlayer:GetAttribute("TrainEventPhase")
+    if phase == "Boarded" or phase == "Departing" or phase == "Returning" or phase == "Respawning" then
+        return true
+    end
+    if PhantomExpressManager and PhantomExpressManager.IsAboard and PhantomExpressManager:IsAboard() then
+        return true
+    end
+    return false
+end
+
+local function isInTrainEvent()
+    return isInForgottenTown() or isAboardPhantomExpress()
+end
+
 local function isInHalloweenDimension()
+    if isInTrainEvent() then
+        return false
+    end
     if LocalPlayer:GetAttribute("InHalloweenDimension") == true then
         return true
     end
@@ -290,6 +333,51 @@ local function isInHalloweenDimension()
         end
     end
     return false
+end
+
+-- ==============================================================================
+-- [ CENTRALIZED CACHED WORKSPACE RESOLVERS (O(1) OPTIMIZED) ]
+-- ==============================================================================
+local _cachedHalloweenDim = nil
+local function getHalloweenDimension()
+    if _cachedHalloweenDim and _cachedHalloweenDim.Parent then
+        return _cachedHalloweenDim
+    end
+    _cachedHalloweenDim = Services.Workspace:FindFirstChild("HalloweenDimension")
+    if not _cachedHalloweenDim then
+        _cachedHalloweenDim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+    end
+    return _cachedHalloweenDim
+end
+
+local _cachedHalloweenWorldEggs = nil
+local function getHalloweenWorldEggs()
+    if _cachedHalloweenWorldEggs and _cachedHalloweenWorldEggs.Parent then
+        return _cachedHalloweenWorldEggs
+    end
+    local dim = getHalloweenDimension()
+    _cachedHalloweenWorldEggs = dim and dim:FindFirstChild("WorldEggs")
+    return _cachedHalloweenWorldEggs
+end
+
+local _cachedRunawayPumpkins = nil
+local function getRunawayPumpkinsFolder()
+    if _cachedRunawayPumpkins and _cachedRunawayPumpkins.Parent then
+        return _cachedRunawayPumpkins
+    end
+    local dim = getHalloweenDimension()
+    _cachedRunawayPumpkins = dim and dim:FindFirstChild("RunawayPumpkins")
+    return _cachedRunawayPumpkins
+end
+
+local _cachedHalloweenMonstersFolder = nil
+local function getHalloweenMonstersFolder()
+    if _cachedHalloweenMonstersFolder and _cachedHalloweenMonstersFolder.Parent then
+        return _cachedHalloweenMonstersFolder
+    end
+    local dim = getHalloweenDimension()
+    _cachedHalloweenMonstersFolder = dim and dim:FindFirstChild("Monsters")
+    return _cachedHalloweenMonstersFolder
 end
 
 -- ==============================================================================
@@ -1363,16 +1451,32 @@ function HalloweenPortalManager.IsInHalloweenDimension()
     return isInHalloweenDimension()
 end
 
+function HalloweenPortalManager.IsInTown()
+    return isInForgottenTown()
+end
+
+function HalloweenPortalManager.IsAboardTrain()
+    return isAboardPhantomExpress()
+end
+
+function HalloweenPortalManager.IsInTrainArea()
+    return isInTrainEvent()
+end
+
 HalloweenPortalManager.IsEntering = false
 
 function HalloweenPortalManager.EnterDimension(timeout)
-    timeout = timeout or 8.0
+    -- Train & Town Dimension Independence:
+    -- Never attempt portal entry while aboard Phantom Express or inside Forgotten Town
+    if isInTrainEvent() then
+        return false
+    end
     if HalloweenPortalManager.IsInHalloweenDimension() then
         return true
     end
 
     if HalloweenPortalManager.IsEntering then
-        local waitDeadline = os.clock() + timeout
+        local waitDeadline = os.clock() + (timeout or 8.0)
         while os.clock() < waitDeadline and not HalloweenPortalManager.IsInHalloweenDimension() do
             Services.RunService.Heartbeat:Wait()
         end
@@ -1380,187 +1484,265 @@ function HalloweenPortalManager.EnterDimension(timeout)
     end
 
     HalloweenPortalManager.IsEntering = true
-    hopOffTreadmill()
-    task.wait(0.05)
 
-    local _, root, hum = getAliveRig()
-    if not root or not hum then
-        HalloweenPortalManager.IsEntering = false
-        return false
-    end
+    local success, result = pcall(function()
+        hopOffTreadmill()
+        task.wait(0.05)
 
-    local portalModel = Services.Workspace:FindFirstChild("HalloweenDimensionPortal", true)
-    local hitbox = portalModel and (portalModel:FindFirstChild("Hitbox") or portalModel:FindFirstChildWhichIsA("BasePart"))
-
-    if not hitbox then
-        HalloweenPortalManager.IsEntering = false
-        return false
-    end
-
-    -- Heartbeat Linear Glide (KNOWLEDGE.md section 6.7 compliant)
-    local targetPos = hitbox.Position + Vector3.new(0, 1.0, 0)
-    local speed = 240 -- Standardized travel speed (180-280 studs/s)
-    local stopDist = 3.0
-
-    -- Interceptions & Bypasses
-    setCollisions(false)
-    hum.PlatformStand = true
-    hum.AutoRotate = false
-
-    local glideStart = os.clock()
-    while (os.clock() - glideStart) < timeout do
-        if HalloweenPortalManager.IsInHalloweenDimension() then
-            break
+        local char, root, hum = getAliveRig()
+        if not char or not root or not hum then
+            return false
         end
 
-        local _, cRoot, cHum = getAliveRig()
-        if not cRoot or not cHum or cHum.Health <= 0 then
-            break
+        local portalModel = Services.Workspace:FindFirstChild("HalloweenDimensionPortal", true)
+        local hitbox = portalModel and (portalModel:FindFirstChild("Hitbox") or portalModel:FindFirstChildWhichIsA("BasePart"))
+
+        if not hitbox then
+            return false
         end
 
-        local diff = targetPos - cRoot.Position
-        if diff.Magnitude <= stopDist then
-            break
+        -- Rig State Interception (Auto Pumpkin movement standard: applyGodMode, no PlatformStand)
+        applyGodMode(char)
+        setCollisions(false)
+
+        local targetPos = hitbox.Position + Vector3.new(0, 1.0, 0)
+        local speed = 260 -- Standardized travel speed matching Auto Pumpkin (260-280 studs/s)
+        local stopDist = 3.5
+
+        -- Dynamic distance-based timeout (Auto Pumpkin formula: dist / speed + 4.0s)
+        local dist = (targetPos - root.Position).Magnitude
+        local dynamicTimeout = (dist / speed) + 4.0
+        if timeout and timeout > dynamicTimeout then
+            dynamicTimeout = timeout
         end
+        local glideDeadline = os.clock() + dynamicTimeout
 
-        local dt = Services.RunService.Heartbeat:Wait()
-        local dir = diff.Unit
-        local step = math.min(speed * dt, diff.Magnitude)
-
-        -- Synchronize AssemblyLinearVelocity to match displacement
-        cRoot.AssemblyLinearVelocity = dir * speed
-        cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
-    end
-
-    -- Trigger touch interest upon contact
-    local _, fRoot, fHum = getAliveRig()
-    if fRoot and hitbox and hitbox.Parent then
-        fRoot.AssemblyLinearVelocity = Vector3.new(0, -0.5, 0)
-        pcall(function()
-            if UniversalCompat and UniversalCompat.FireTouch then
-                UniversalCompat.FireTouch(fRoot, hitbox, 0)
-                task.wait(0.04)
-                UniversalCompat.FireTouch(fRoot, hitbox, 1)
+        -- Heartbeat Linear Glide Loop (Natural locomotion, zero PlatformStand / AutoRotate corruption)
+        while (targetPos - root.Position).Magnitude > stopDist do
+            if HalloweenPortalManager.IsInHalloweenDimension() or os.clock() > glideDeadline or isHalloweenMapClosed() then
+                break
             end
-        end)
-    end
 
-    -- Restore humanoid states & collisions
-    if fHum then
-        fHum.PlatformStand = false
-        fHum.AutoRotate = true
-    end
-    if fRoot then
-        fRoot.AssemblyLinearVelocity = Vector3.zero
-        fRoot.AssemblyAngularVelocity = Vector3.zero
-    end
+            local dt = Services.RunService.Heartbeat:Wait()
+            local _, cRoot, cHum = getAliveRig()
+            if not cRoot or not cHum or cHum.Health <= 0 then
+                break
+            end
+
+            local diff = targetPos - cRoot.Position
+            local dir = diff.Unit
+            local step = math.min(speed * dt, diff.Magnitude)
+
+            -- Synchronize AssemblyLinearVelocity to match directional movement
+            cRoot.AssemblyLinearVelocity = dir * speed
+            cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
+        end
+
+        -- Active Contact Latch Phase (Auto Pumpkin contact pattern: lock CFrame inside hitbox, zero velocity)
+        local _, fRoot = getAliveRig()
+        if fRoot and hitbox and hitbox.Parent and not HalloweenPortalManager.IsInHalloweenDimension() then
+            fRoot.CFrame = CFrame.new(hitbox.Position)
+            fRoot.AssemblyLinearVelocity = Vector3.zero
+            fRoot.AssemblyAngularVelocity = Vector3.zero
+
+            -- Fire TouchInterest inside hitbox volume for 100% valid collision registration
+            pcall(function()
+                if UniversalCompat and UniversalCompat.FireTouch then
+                    UniversalCompat.FireTouch(fRoot, hitbox, 0)
+                    task.wait(0.04)
+                    UniversalCompat.FireTouch(fRoot, hitbox, 1)
+                end
+            end)
+
+            -- Settle latch: hold centered inside portal hitbox while awaiting server dimension transition
+            local latchStart = os.clock()
+            while (os.clock() - latchStart) < 0.65 and not HalloweenPortalManager.IsInHalloweenDimension() do
+                local _, curRoot = getAliveRig()
+                if curRoot and hitbox and hitbox.Parent then
+                    curRoot.CFrame = CFrame.new(hitbox.Position)
+                    curRoot.AssemblyLinearVelocity = Vector3.zero
+                end
+                Services.RunService.Heartbeat:Wait()
+            end
+        end
+
+        -- Clean release: zero residual velocity and restore collisions
+        local _, endRoot = getAliveRig()
+        if endRoot then
+            endRoot.AssemblyLinearVelocity = Vector3.zero
+            endRoot.AssemblyAngularVelocity = Vector3.zero
+        end
+        setCollisions(true)
+
+        -- Confirmation window: wait up to 3.0 seconds for server dimension replication
+        local confirmWait = os.clock() + 3.0
+        while os.clock() < confirmWait and not HalloweenPortalManager.IsInHalloweenDimension() do
+            Services.RunService.Heartbeat:Wait()
+        end
+
+        return HalloweenPortalManager.IsInHalloweenDimension()
+    end)
+
+    -- Guaranteed cleanup
     setCollisions(true)
-
-    -- Wait up to 3 seconds for server dimension replication
-    local confirmWait = os.clock() + 3.0
-    while os.clock() < confirmWait and not HalloweenPortalManager.IsInHalloweenDimension() do
-        Services.RunService.Heartbeat:Wait()
+    local _, finalRoot = getAliveRig()
+    if finalRoot then
+        finalRoot.AssemblyLinearVelocity = Vector3.zero
+        finalRoot.AssemblyAngularVelocity = Vector3.zero
     end
-
     HalloweenPortalManager.IsEntering = false
-    return HalloweenPortalManager.IsInHalloweenDimension()
+
+    if success then
+        return result == true
+    else
+        return HalloweenPortalManager.IsInHalloweenDimension()
+    end
 end
 
+HalloweenPortalManager.IsExiting = false
+
 function HalloweenPortalManager.ExitDimension(timeout)
-    timeout = timeout or 6.0
+    -- Train & Town Dimension Independence:
+    -- Never attempt portal exit while aboard Phantom Express or inside Forgotten Town
+    if isInTrainEvent() then
+        return false
+    end
     if not HalloweenPortalManager.IsInHalloweenDimension() then
         return true
     end
 
-    local _, root, hum = getAliveRig()
-    if not root or not hum then return false end
+    if HalloweenPortalManager.IsExiting then
+        local waitDeadline = os.clock() + (timeout or 12.0)
+        while os.clock() < waitDeadline and HalloweenPortalManager.IsInHalloweenDimension() do
+            Services.RunService.Heartbeat:Wait()
+        end
+        return not HalloweenPortalManager.IsInHalloweenDimension()
+    end
 
-    local exitPart = nil
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    if dim then
-        local portalHome = dim:FindFirstChild("PortalHome", true)
-        if portalHome then
-            exitPart = portalHome:FindFirstChild("Portal") or portalHome:FindFirstChildWhichIsA("BasePart")
-        end
-        if not exitPart then
-            local questBuilding = dim:FindFirstChild("Quest Building", true)
-            if questBuilding then
-                exitPart = questBuilding:FindFirstChild("Portal") or questBuilding:FindFirstChildWhichIsA("BasePart")
-            end
-        end
-        if not exitPart then
-            for _, desc in ipairs(dim:GetDescendants()) do
-                if desc:IsA("BasePart") and desc.Name == "Portal" then
-                    exitPart = desc
-                    break
+    HalloweenPortalManager.IsExiting = true
+    timeout = timeout or 12.0
+    local exitStartTime = os.clock()
+    local attempts = 0
+
+    local success, result = pcall(function()
+        -- Active Retry Loop: Guaranteed Exit despite rubberbanding
+        while (os.clock() - exitStartTime) < timeout and HalloweenPortalManager.IsInHalloweenDimension() do
+            attempts = attempts + 1
+            local char, root, hum = getAliveRig()
+            if not char or not root or not hum then break end
+
+            local exitPart = nil
+            local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
+            if dim then
+                local portalHome = dim:FindFirstChild("PortalHome", true)
+                if portalHome then
+                    exitPart = portalHome:FindFirstChild("Portal") or portalHome:FindFirstChildWhichIsA("BasePart")
+                end
+                if not exitPart then
+                    local questBuilding = dim:FindFirstChild("Quest Building", true)
+                    if questBuilding then
+                        exitPart = questBuilding:FindFirstChild("Portal") or questBuilding:FindFirstChildWhichIsA("BasePart")
+                    end
+                end
+                if not exitPart then
+                    for _, desc in ipairs(dim:GetDescendants()) do
+                        if desc:IsA("BasePart") and desc.Name == "Portal" then
+                            exitPart = desc
+                            break
+                        end
+                    end
                 end
             end
-        end
-    end
 
-    if not exitPart then return false end
+            if not exitPart then break end
 
-    -- Heartbeat Linear Glide to exit portal
-    local targetPos = exitPart.Position + Vector3.new(0, 1.0, 0)
-    local speed = 240
-    local stopDist = 3.0
+            -- Rig State Interception (Auto Pumpkin movement standard: applyGodMode, no PlatformStand/AutoRotate corruption)
+            applyGodMode(char)
+            setCollisions(false)
 
-    setCollisions(false)
-    hum.PlatformStand = true
-    hum.AutoRotate = false
+            local targetPos = exitPart.Position + Vector3.new(0, 1.0, 0)
+            local speed = 260
+            local stopDist = 3.5
 
-    local glideStart = os.clock()
-    while (os.clock() - glideStart) < timeout do
-        if not HalloweenPortalManager.IsInHalloweenDimension() then
-            break
-        end
+            local dist = (targetPos - root.Position).Magnitude
+            local glideDeadline = os.clock() + (dist / speed) + 3.0
 
-        local _, cRoot, cHum = getAliveRig()
-        if not cRoot or not cHum or cHum.Health <= 0 then
-            break
-        end
+            -- Heartbeat Linear Glide Loop (Natural upright locomotion)
+            while (targetPos - root.Position).Magnitude > stopDist do
+                if not HalloweenPortalManager.IsInHalloweenDimension() or os.clock() > glideDeadline then
+                    break
+                end
 
-        local diff = targetPos - cRoot.Position
-        if diff.Magnitude <= stopDist then
-            break
-        end
+                local dt = Services.RunService.Heartbeat:Wait()
+                local _, cRoot, cHum = getAliveRig()
+                if not cRoot or not cHum or cHum.Health <= 0 then break end
 
-        local dt = Services.RunService.Heartbeat:Wait()
-        local dir = diff.Unit
-        local step = math.min(speed * dt, diff.Magnitude)
+                local diff = targetPos - cRoot.Position
+                local dir = diff.Unit
+                local step = math.min(speed * dt, diff.Magnitude)
 
-        cRoot.AssemblyLinearVelocity = dir * speed
-        cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
-    end
-
-    local _, fRoot, fHum = getAliveRig()
-    if fRoot and exitPart and exitPart.Parent then
-        fRoot.AssemblyLinearVelocity = Vector3.new(0, -0.5, 0)
-        pcall(function()
-            if UniversalCompat and UniversalCompat.FireTouch then
-                UniversalCompat.FireTouch(fRoot, exitPart, 0)
-                task.wait(0.04)
-                UniversalCompat.FireTouch(fRoot, exitPart, 1)
+                cRoot.AssemblyLinearVelocity = dir * speed
+                cRoot.CFrame = CFrame.new(cRoot.Position + (dir * step), cRoot.Position + (dir * 10))
             end
-        end)
-    end
 
-    if fHum then
-        fHum.PlatformStand = false
-        fHum.AutoRotate = true
-    end
-    if fRoot then
-        fRoot.AssemblyLinearVelocity = Vector3.zero
-        fRoot.AssemblyAngularVelocity = Vector3.zero
-    end
+            -- Active Contact Latch Phase (Centers character inside exit portal hitbox with zero velocity)
+            local _, fRoot = getAliveRig()
+            if fRoot and exitPart and exitPart.Parent and HalloweenPortalManager.IsInHalloweenDimension() then
+                fRoot.CFrame = CFrame.new(exitPart.Position)
+                fRoot.AssemblyLinearVelocity = Vector3.zero
+                fRoot.AssemblyAngularVelocity = Vector3.zero
+
+                pcall(function()
+                    if UniversalCompat and UniversalCompat.FireTouch then
+                        UniversalCompat.FireTouch(fRoot, exitPart, 0)
+                        task.wait(0.04)
+                        UniversalCompat.FireTouch(fRoot, exitPart, 1)
+                    end
+                end)
+
+                -- Settle latch: hold centered inside exit portal volume while awaiting server transition
+                local latchStart = os.clock()
+                while (os.clock() - latchStart) < 0.65 and HalloweenPortalManager.IsInHalloweenDimension() do
+                    local _, curRoot = getAliveRig()
+                    if curRoot and exitPart and exitPart.Parent then
+                        curRoot.CFrame = CFrame.new(exitPart.Position)
+                        curRoot.AssemblyLinearVelocity = Vector3.zero
+                    end
+                    Services.RunService.Heartbeat:Wait()
+                end
+            end
+
+            -- Clean release
+            local _, endRoot = getAliveRig()
+            if endRoot then
+                endRoot.AssemblyLinearVelocity = Vector3.zero
+                endRoot.AssemblyAngularVelocity = Vector3.zero
+            end
+            setCollisions(true)
+
+            -- Verification window: wait up to 2.5s to confirm exit replication
+            local confirmDeadline = os.clock() + 2.5
+            while os.clock() < confirmDeadline and HalloweenPortalManager.IsInHalloweenDimension() do
+                Services.RunService.Heartbeat:Wait()
+            end
+        end
+
+        return not HalloweenPortalManager.IsInHalloweenDimension()
+    end)
+
     setCollisions(true)
-
-    local deadline = os.clock() + 3.0
-    while os.clock() < deadline and HalloweenPortalManager.IsInHalloweenDimension() do
-        Services.RunService.Heartbeat:Wait()
+    local _, finalRoot = getAliveRig()
+    if finalRoot then
+        finalRoot.AssemblyLinearVelocity = Vector3.zero
+        finalRoot.AssemblyAngularVelocity = Vector3.zero
     end
+    HalloweenPortalManager.IsExiting = false
 
-    return not HalloweenPortalManager.IsInHalloweenDimension()
+    if success then
+        return result == true
+    else
+        return not HalloweenPortalManager.IsInHalloweenDimension()
+    end
 end
 
 -- [ HALLOWEEN CANONICAL AREA MANAGER ]
@@ -1712,8 +1894,7 @@ function HalloweenAreaManager:GetEggsByArea()
         [self.CanonicalNames.Zone3] = {}
     }
 
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    local worldEggs = dim and dim:FindFirstChild("WorldEggs")
+    local worldEggs = getHalloweenWorldEggs()
     if not worldEggs then return areaMap end
 
     for _, egg in ipairs(worldEggs:GetChildren()) do
@@ -1788,8 +1969,7 @@ function HalloweenCombatManager:GetWeaponList()
 end
 
 function HalloweenCombatManager:GetClosestMonster()
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    local monstersFolder = dim and dim:FindFirstChild("Monsters") or Services.Workspace:FindFirstChild("Monsters", true)
+    local monstersFolder = getHalloweenMonstersFolder() or Services.Workspace:FindFirstChild("Monsters")
     if not monstersFolder then return nil end
 
     local _, root = getAliveRig()
@@ -1894,6 +2074,7 @@ HalloweenPumpkinManager = {
     PumpkinsDeposited = 0,
     CurrentTarget = nil,
     Config = {
+        ScanRadius = 1000.0,
         AltarDepositPos = Vector3.new(-5521.6, -195.0, -6623.0),
         Bounds = {
             MinX = -7000.0,
@@ -1941,6 +2122,8 @@ function HalloweenPumpkinManager:GetTarget()
     local _, root = getAliveRig()
     if not root then return nil, nil, nil end
 
+    local scanRadius = self.Config.ScanRadius or 1000.0
+
     -- Sticky Target Lock: re-evaluate only when the current target is no longer available or valid
     if self.CurrentTarget then
         local tModel = self.CurrentTarget.Model
@@ -1948,23 +2131,20 @@ function HalloweenPumpkinManager:GetTarget()
         local tPart = self.CurrentTarget.Part
         if tModel and tModel.Parent and tPrompt and tPrompt.Parent and tPrompt.Enabled and tPart and tPart.Parent then
             local distToAltar = (tPart.Position - self.Config.AltarDepositPos).Magnitude
-            if distToAltar <= 300 then
+            if distToAltar <= scanRadius + 150 then
                 return tModel, tPrompt, tPart
             end
         end
         self.CurrentTarget = nil
     end
 
-    local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-    if not dim then return nil, nil, nil end
-
-    local folder = dim:FindFirstChild("RunawayPumpkins")
+    local folder = getRunawayPumpkinsFolder()
     local searchList = folder and folder:GetChildren() or {}
 
     local closestModel = nil
     local closestPrompt = nil
     local closestPart = nil
-    local minDistance = math.huge
+    local minAltarDist = math.huge
 
     for _, model in ipairs(searchList) do
         if model:IsA("Model") and model.Parent then
@@ -1974,10 +2154,12 @@ function HalloweenPumpkinManager:GetTarget()
             if prompt and prompt.Enabled and part then
                 local p = part.Position
                 local distToAltar = (p - self.Config.AltarDepositPos).Magnitude
-                if distToAltar <= 280 then
-                    local distToPlayer = (root.Position - p).Magnitude
-                    if distToPlayer < minDistance then
-                        minDistance = distToPlayer
+                local distToPlayer = (root.Position - p).Magnitude
+                -- Scans across the entire area (up to 1,000 studs from Altar or Player)
+                if distToAltar <= scanRadius or distToPlayer <= scanRadius then
+                    -- Strictly prioritize the nearest runaway pumpkin to the altar/shrine
+                    if distToAltar < minAltarDist then
+                        minAltarDist = distToAltar
                         closestModel = model
                         closestPrompt = prompt
                         closestPart = part
@@ -2745,8 +2927,7 @@ do
 
     -- Scans WorldEggs for best valid candidate matching Target Areas and Min Rarity
     local function selectTargetEgg()
-        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-        local folder = dim and dim:FindFirstChild("WorldEggs")
+        local folder = getHalloweenWorldEggs()
         if not folder then return nil end
 
         local _, root = getAliveRig()
@@ -2801,13 +2982,10 @@ do
         local _, root = getAliveRig()
         if not root then return nil end
 
-        local dim = Services.Workspace:FindFirstChild("HalloweenDimension", true)
-        if not dim then return nil end
-
         local closestEgg = nil
         local closestDist = CONFIG.GateSearchRadius
 
-        local worldEggs = dim:FindFirstChild("WorldEggs")
+        local worldEggs = getHalloweenWorldEggs()
         if worldEggs then
             for _, egg in ipairs(worldEggs:GetChildren()) do
                 if egg:IsA("PVInstance") then
@@ -2980,6 +3158,9 @@ do
     HalloweenStealManager.Abort = function()
         State.currentSession = State.currentSession + 1
         State.isBusy = false
+        if PriorityManager and PriorityManager.Release then
+            PriorityManager:Release("Halloween Steal")
+        end
         local _, root, hum = getAliveRig()
         if hum then hum.PlatformStand = false end
         if root then
@@ -3001,49 +3182,71 @@ do
                     if char and root and hum and not State.isBusy then
                         applyRigProtection(char)
 
-                        if isCarryingEgg() then
-                            State.isBusy = true
-                            State.currentSession = State.currentSession + 1
-
-                            runCompleteStealCycle(nil, State.currentSession)
-
-                            State.isBusy = false
+                        if PriorityManager and PriorityManager.CanRun and not PriorityManager:CanRun("Halloween Steal") then
                             task.wait(0.2)
                         else
-                            local targetEgg = selectTargetEgg()
+                            if isCarryingEgg() then
+                                if not PriorityManager or PriorityManager:Acquire("Halloween Steal", 25.0) then
+                                    State.isBusy = true
+                                    State.currentSession = State.currentSession + 1
 
-                            if targetEgg and targetEgg.Parent then
-                                State.isBusy = true
-                                State.currentSession = State.currentSession + 1
-                                local session = State.currentSession
+                                    runCompleteStealCycle(nil, State.currentSession)
 
-                                runCompleteStealCycle(targetEgg, session)
-
-                                State.isBusy = false
-                                task.wait(0.1)
+                                    State.isBusy = false
+                                    if PriorityManager and PriorityManager.Release then
+                                        PriorityManager:Release("Halloween Steal")
+                                    end
+                                    task.wait(0.2)
+                                end
                             else
-                                task.wait(1.0)
+                                local targetEgg = selectTargetEgg()
+
+                                if targetEgg and targetEgg.Parent then
+                                    if not PriorityManager or PriorityManager:Acquire("Halloween Steal", 25.0) then
+                                        State.isBusy = true
+                                        State.currentSession = State.currentSession + 1
+                                        local session = State.currentSession
+
+                                        runCompleteStealCycle(targetEgg, session)
+
+                                        State.isBusy = false
+                                        if PriorityManager and PriorityManager.Release then
+                                            PriorityManager:Release("Halloween Steal")
+                                        end
+                                        task.wait(0.1)
+                                    end
+                                else
+                                    task.wait(1.0)
+                                end
                             end
                         end
                     end
                 else
-                    -- Normal dimension: ONLY enter portal if an action is actually needed!
+                    -- Normal dimension: ONLY enter portal if an action is actually needed and PriorityManager allows!
                     local hasAction = isCarryingEgg() or (selectTargetEgg() ~= nil)
                     local mapOpen = not (typeof(isHalloweenMapClosed) == "function" and isHalloweenMapClosed())
+                    local canRun = not PriorityManager or PriorityManager:CanRun("Halloween Steal")
 
-                    if hasAction and mapOpen then
+                    if hasAction and mapOpen and canRun then
+                        if PriorityManager and PriorityManager.Acquire then
+                            PriorityManager:Acquire("Halloween Steal", 10.0)
+                        end
                         if HalloweenPortalManager and HalloweenPortalManager.EnterDimension then
                             HalloweenPortalManager.EnterDimension(5.0)
                         else
                             task.wait(1.5)
                         end
+                        if PriorityManager and PriorityManager.Release then
+                            PriorityManager:Release("Halloween Steal")
+                        end
                     else
-                        task.wait(1.5)
+                        task.wait(1.0)
                     end
                 end
+                task.wait(0.08)
+            else
+                task.wait(0.5)
             end
-
-            Services.RunService.Heartbeat:Wait()
         end
     end)
 end
@@ -3496,6 +3699,16 @@ function HalloweenBossManager:HandleArenaExit(arena)
 
     if hitbox then
         self:GlideTo(hitbox.Position, 2.0)
+        pcall(function()
+            if UniversalCompat and UniversalCompat.FireTouch then
+                local _, root = getAliveRig()
+                if root then
+                    UniversalCompat.FireTouch(root, hitbox, 0)
+                    task.wait(0.04)
+                    UniversalCompat.FireTouch(root, hitbox, 1)
+                end
+            end
+        end)
         task.wait(0.5)
         return true
     end
@@ -4064,8 +4277,10 @@ HalloweenFishingManager = {
     IsActive = false,
     CooldownUntil = 0,
     FishCaught = 0,
-    CurrentFishingSpot = nil
+    CurrentFishingSpot = nil,
+    _RayParams = RaycastParams.new()
 }
+HalloweenFishingManager._RayParams.FilterType = Enum.RaycastFilterType.Exclude
 
 function HalloweenFishingManager:HasRod()
     local char = LocalPlayer.Character
@@ -4086,8 +4301,7 @@ function HalloweenFishingManager:HasRod()
 end
 
 function HalloweenFishingManager:RaycastWater(pos)
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
+    local params = self._RayParams
     local filter = {LocalPlayer.Character}
     for attempt = 1, 6 do
         params.FilterDescendantsInstances = filter
@@ -4329,6 +4543,912 @@ function HalloweenFishingManager:Abort()
 end
 
 
+
+-- ==============================================================================
+-- [ PHANTOM EXPRESS: FULL-LIFECYCLE SERVICE WITH GROUND-LOCK & PRE-CHECK TRADE ]
+-- ==============================================================================
+do
+    local LocalPlayer = Services.Players.LocalPlayer or Services.Players.PlayerAdded:Wait()
+    local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+    local CONFIG = {
+        TravelSpeed = 260,         -- High-speed glide for cross-town travel
+        LockMinSpeed = 4,          -- Minimum tracking velocity while suction is locked
+        LockMaxSpeed = 38,         -- Maximum tracking velocity while suction is locked
+        BaseStandoff = 15,         -- Initial standoff distance (shrinks to 10 -> 7)
+        HeightAboveGround = 3.2,   -- Constant elevation offset above detected floor
+        GhostPriority = "Rarest First",
+        AutoBoss = true,
+        SoulTradeDelay = 0.35,
+        MaxTradesPerRun = 100
+    }
+
+    local PHASE_IN_TRANSIT = {
+        Boarded = true,
+        Departing = true,
+        Returning = true,
+        Respawning = true
+    }
+
+    local State = {
+        CurrentStatus = "Idle",
+        IsBusy = false,
+        RidesCompleted = 0,
+        SoulsTraded = 0,
+        LastStatusCheck = 0,
+        CachedState = nil,
+        CachedPrompts = {},
+        LastSuckTime = 0,
+        DoneDeparture = nil,
+        TownSettled = false,
+        FailAt = 0
+    }
+
+    local Packages = Services.ReplicatedStorage:WaitForChild("Packages", 5)
+    local Networking = Packages and Packages:WaitForChild("Networking", 5)
+
+    local Remotes = {
+        TrainAction = Networking and Networking:FindFirstChild("RF/TrainEvent/Action"),
+        TrainState = Networking and Networking:FindFirstChild("RE/TrainEvent/State"),
+        CaptureState = Networking and Networking:FindFirstChild("RE/TrainEvent/CaptureState"),
+        BossSuction = Networking and Networking:FindFirstChild("RE/GhostBoss/Suction")
+    }
+
+    local function applyRigProtection(character)
+        if not character then return end
+        local humanoid = character:FindFirstChildOfClass("Humanoid")
+        if not humanoid then return end
+
+        local blockedStates = {
+            Enum.HumanoidStateType.FallingDown,
+            Enum.HumanoidStateType.Ragdoll,
+            Enum.HumanoidStateType.Physics
+        }
+        for _, state in ipairs(blockedStates) do
+            pcall(function() humanoid:SetStateEnabled(state, false) end)
+        end
+        pcall(function() humanoid.BreakJointsOnDeath = false end)
+
+        for _, desc in ipairs(character:GetDescendants()) do
+            if desc:IsA("BallSocketConstraint") or desc:IsA("HingeConstraint") or 
+              (desc:IsA("NoCollisionConstraint") and string.find(desc.Name, "Ragdoll", 1, true)) then
+                pcall(function() desc:Destroy() end)
+            elseif desc:IsA("Motor6D") and not desc.Enabled then
+                desc.Enabled = true
+            end
+        end
+    end
+
+    local function resolveWorldPosition(instance)
+        if not instance then return nil end
+        if instance:IsA("BasePart") then
+            return instance.Position
+        elseif instance:IsA("Attachment") then
+            return instance.WorldPosition
+        elseif instance:IsA("Model") then
+            return instance:GetPivot().Position
+        end
+        return instance.Parent and resolveWorldPosition(instance.Parent)
+    end
+
+    local _vacuumRayParams = RaycastParams.new()
+    _vacuumRayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local function getGroundElevation(x, z, fallbackY)
+        local char = LocalPlayer.Character
+        local ghostFolder = Services.Workspace:FindFirstChild("TrainGhostVisuals")
+        _vacuumRayParams.FilterDescendantsInstances = { char, ghostFolder }
+
+        local origin = Vector3.new(x, fallbackY + 15, z)
+        local result = Services.Workspace:Raycast(origin, Vector3.new(0, -60, 0), _vacuumRayParams)
+        if result then
+            return result.Position.Y
+        end
+        return fallbackY
+    end
+
+    local function projectOnRail(prompt, startAttr, endAttr)
+        local _, root = getAliveRig()
+        local startPos = prompt:GetAttribute(startAttr)
+        local endPos = prompt:GetAttribute(endAttr)
+
+        if root and typeof(startPos) == "Vector3" and typeof(endPos) == "Vector3" then
+            local railVec = endPos - startPos
+            local railLenSq = railVec:Dot(railVec)
+            if railLenSq > 0 then
+                local t = math.clamp((root.Position - startPos):Dot(railVec) / railLenSq, 0, 1)
+                return startPos + railVec * t
+            end
+            return startPos
+        end
+        return resolveWorldPosition(prompt.Parent)
+    end
+
+    local function findTrainPrompt(searchKey, searchValue)
+        local cacheId = searchKey .. "_" .. tostring(searchValue)
+        local cached = State.CachedPrompts[cacheId]
+        if cached and cached.Parent and cached.Enabled then return cached end
+
+        local searchContainers = {
+            Services.Workspace:FindFirstChild("TrainEventRuntime"),
+            Services.Workspace:FindFirstChild("TrainEventAssets"),
+            Services.Workspace
+        }
+
+        for _, container in ipairs(searchContainers) do
+            if container then
+                for _, desc in ipairs(container:GetDescendants()) do
+                    if desc:IsA("ProximityPrompt") then
+                        if (searchKey == "Name" and desc.Name == searchValue) or 
+                           (desc:GetAttribute(searchKey) == searchValue) then
+                            State.CachedPrompts[cacheId] = desc
+                            return desc
+                        end
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function firePrompt(prompt)
+        if prompt and prompt:IsA("ProximityPrompt") and prompt.Enabled then
+            prompt.HoldDuration = 0
+            prompt.RequiresLineOfSight = false
+            if typeof(fireproximityprompt) == "function" then
+                fireproximityprompt(prompt, 0)
+            else
+                prompt:InputHoldBegin()
+                prompt:InputHoldEnd()
+            end
+            return true
+        end
+        return false
+    end
+
+    local function glideTo(targetPos, speed, stopDistance)
+        local char, root = getAliveRig()
+        if not root then return false end
+
+        speed = speed or CONFIG.TravelSpeed
+        stopDistance = stopDistance or 3.0
+
+        applyRigProtection(char)
+
+        local timeout = os.clock() + ((targetPos - root.Position).Magnitude / speed) + 3.0
+
+        while (targetPos - root.Position).Magnitude > stopDistance do
+            if not getgenv().AutoPhantomExpress or os.clock() > timeout then
+                break
+            end
+
+            local dt = Services.RunService.Heartbeat:Wait()
+            local _, liveRoot = getAliveRig()
+            if not liveRoot then break end
+
+            local diff = targetPos - liveRoot.Position
+            local dir = diff.Unit
+            local step = math.min(speed * dt, diff.Magnitude)
+
+            liveRoot.AssemblyLinearVelocity = dir * speed
+            liveRoot.CFrame = CFrame.new(liveRoot.Position + dir * step, liveRoot.Position + dir * 10)
+        end
+
+        local _, endRoot = getAliveRig()
+        if endRoot then
+            endRoot.AssemblyLinearVelocity = Vector3.zero
+        end
+        return true
+    end
+
+    -- --------------------------------------------------------------------------
+    -- [ IN-MEMORY STATUS TRACKING (NO HUD GUI) ]
+    -- --------------------------------------------------------------------------
+    local function updateHUD(status, info, detailText)
+        State.CurrentStatus = status or State.CurrentStatus
+        if info then State.CurrentInfo = info end
+        if detailText then State.CurrentDetail = detailText end
+    end
+    local updateStatus = updateHUD
+
+    -- --------------------------------------------------------------------------
+    -- [ TRAIN NETWORKING & ATTRIBUTE READERS ]
+    -- --------------------------------------------------------------------------
+    if Remotes.TrainState then
+        Remotes.TrainState.OnClientEvent:Connect(function(packet)
+            if type(packet) == "table" then
+                State.CachedState = packet
+            end
+        end)
+    end
+
+    local function getTrainPhase()
+        local attr = LocalPlayer:GetAttribute("TrainEventPhase")
+        if attr ~= nil then return tostring(attr) end
+        return State.CachedState and State.CachedState.Phase or "Unknown"
+    end
+
+    local function isInForgottenTown()
+        if getTrainPhase() == "Town" then return true end
+        local char = LocalPlayer.Character
+        return char and char:GetAttribute("TrainEventInForgottenTown") == true
+    end
+
+    local function isPlayerOnTrain()
+        local phase = getTrainPhase()
+        return PHASE_IN_TRANSIT[phase] == true
+    end
+
+    local function callTrainAction(...)
+        if not Remotes.TrainAction then return false, nil end
+        local success, r1, r2 = pcall(function(...)
+            return Remotes.TrainAction:InvokeServer(...)
+        end, ...)
+        if not success then return false, tostring(r1) end
+        return true, r1, r2
+    end
+
+    local function pollTrainStatus()
+        if os.clock() - State.LastStatusCheck < 3.0 and State.CachedState then
+            return State.CachedState
+        end
+        State.LastStatusCheck = os.clock()
+        local ok, r1, r2 = callTrainAction("Status")
+        local packet = (type(r2) == "table" and r2) or (type(r1) == "table" and r1)
+        if packet then
+            State.CachedState = packet
+            return packet
+        end
+        return State.CachedState
+    end
+
+    -- --------------------------------------------------------------------------
+    -- [ CUTSCENE & ARRIVAL GUARD ]
+    -- --------------------------------------------------------------------------
+    local function waitForArrivalCutscene()
+        updateHUD("Arriving in Town", "Waiting for train cutscene...", "Cutscene Guard")
+        local deadline = os.clock() + 18.0
+
+        while os.clock() < deadline and getgenv().AutoPhantomExpress do
+            local char, root, hum = getAliveRig()
+            if not char or not root or not hum then
+                task.wait(0.2)
+            else
+                local isCameraScripted = false
+                local cam = workspace.CurrentCamera
+                if cam and cam.CameraType == Enum.CameraType.Scriptable then
+                    isCameraScripted = true
+                end
+
+                local isSitting = hum.Sit == true
+                local isAnchored = root.Anchored == true
+                local isCutsceneAttr = char:GetAttribute("InCutscene") == true or LocalPlayer:GetAttribute("InCutscene") == true
+
+                if isCameraScripted or isSitting or isAnchored or isCutsceneAttr then
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    task.wait(0.2)
+                else
+                    if hum.Sit then
+                        pcall(function() hum.Sit = false end)
+                    end
+                    break
+                end
+            end
+        end
+
+        updateHUD("Arrival Complete", "Syncing with platform...", "Settle Settle")
+        task.wait(1.5)
+        return true
+    end
+
+    -- --------------------------------------------------------------------------
+    -- [ TOOL VERIFICATION (TICKET & VACUUM) ]
+    -- --------------------------------------------------------------------------
+    local function findTicketTool()
+        local searchList = { LocalPlayer.Character, LocalPlayer:FindFirstChildOfClass("Backpack") }
+        for _, container in ipairs(searchList) do
+            if container then
+                for _, item in ipairs(container:GetChildren()) do
+                    if item:IsA("Tool") and (item:GetAttribute("ConductorTicket") == true or item.Name:lower():find("ticket")) then
+                        return item
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function hasTicketAccess()
+        if findTicketTool() ~= nil then return true end
+        local ok, saveModule = pcall(function() return require(Services.ReplicatedStorage.Shared.Save) end)
+        if ok and type(saveModule) == "table" then
+            local getData = saveModule.Get or saveModule.Peek
+            local data = type(getData) == "function" and getData() or nil
+            local trainData = type(data) == "table" and data.TrainEvent or nil
+            if type(trainData) == "table" then
+                return trainData.AccessUnlocked == true or (tonumber(trainData.Tickets) or 0) > 0
+            end
+        end
+        return true
+    end
+
+    local function findVacuumTool()
+        local searchList = { LocalPlayer.Character, LocalPlayer:FindFirstChildOfClass("Backpack") }
+        for _, container in ipairs(searchList) do
+            if container then
+                for _, item in ipairs(container:GetChildren()) do
+                    if item:IsA("Tool") and (item:GetAttribute("GhostVacuum") == true or item.Name:lower():find("vacuum")) then
+                        return item
+                    end
+                end
+            end
+        end
+        return nil
+    end
+
+    local function equipTool(tool)
+        local _, _, hum = getAliveRig()
+        if tool and hum and tool.Parent ~= LocalPlayer.Character then
+            pcall(function() hum:EquipTool(tool) end)
+            task.wait(0.2)
+        end
+        return tool
+    end
+
+    -- --------------------------------------------------------------------------
+    -- [ STAGE 1: PORTAL INGRESS, STATION & BOARDING ]
+    -- --------------------------------------------------------------------------
+    local function attemptTrainBoarding()
+        if isPlayerOnTrain() then
+            updateHUD("On Phantom Express", nil, "Phase: " .. getTrainPhase())
+            return true
+        end
+
+        updateHUD("Scanning Station...", nil, "Checking Arrival")
+
+        local boardPrompt = findTrainPrompt("Name", "TrainBoard")
+        local trainState = pollTrainStatus()
+        local serverTime = workspace:GetServerTimeNow()
+        local departureTime = trainState and tonumber(trainState.DepartureAt) or 0
+
+        if State.DoneDeparture and departureTime > 0 and State.DoneDeparture == departureTime then
+            local secondsLeft = math.max(0, math.floor(departureTime - serverTime))
+            updateHUD("Already Boarded", "Waiting for train to depart...", secondsLeft .. "s remaining")
+            return true
+        end
+
+        local isPhysicallyReady = (boardPrompt ~= nil and boardPrompt.Parent ~= nil and boardPrompt.Enabled)
+        local isRemotelyReady = (trainState ~= nil and trainState.ArrivalOpen == true and serverTime < departureTime)
+
+        if not isPhysicallyReady and not isRemotelyReady then
+            if trainState and not trainState.AtStation and (serverTime < departureTime) then
+                updateHUD("Summoning Train", nil, "Invoking Station Remote")
+                callTrainAction("Station")
+                task.wait(2.5)
+                boardPrompt = findTrainPrompt("Name", "TrainBoard")
+            else
+                updateHUD("Waiting for Train Arrival", nil, "Station Waiting")
+                return false
+            end
+        end
+
+        boardPrompt = boardPrompt or findTrainPrompt("Name", "TrainBoard")
+        if not boardPrompt or not boardPrompt.Parent then
+            updateHUD("Locating Boarding Door", nil, "Scanning Tracks")
+            return false
+        end
+
+        updateHUD("Moving to Train Platform", nil, "Rail Projection")
+        local railTarget = projectOnRail(boardPrompt, "BoardRailStart", "BoardRailEnd")
+        glideTo(railTarget + Vector3.new(0, 2.5, 0), CONFIG.TravelSpeed, 3)
+
+        local ticketTool = findTicketTool()
+        if ticketTool then
+            equipTool(ticketTool)
+            task.wait(0.2)
+        end
+
+        updateHUD("Boarding Phantom Express", nil, "Activating Boarding")
+        firePrompt(boardPrompt)
+        local ok, r1 = callTrainAction("Board")
+
+        if ok and r1 ~= false then
+            if departureTime > 0 then
+                State.DoneDeparture = departureTime
+            end
+            State.TownSettled = false
+            State.RidesCompleted = State.RidesCompleted + 1
+            updateHUD("Boarded Successfully!", string.format("Rides: %d | Purchases: %d", State.RidesCompleted, State.SoulsTraded), "Seated on Train")
+
+            local departDeadline = os.clock() + 30
+            while os.clock() < departDeadline do
+                if isInForgottenTown() or isPlayerOnTrain() then
+                    break
+                end
+                Services.RunService.Heartbeat:Wait()
+            end
+            return true
+        else
+            State.FailAt = os.clock() + 4
+            updateHUD("Boarding Cooldown", "Retrying in a moment...", "Wait")
+        end
+        return false
+    end
+
+    -- --------------------------------------------------------------------------
+    -- [ STAGE 2: VACUUM PICKUP & EQUIP ]
+    -- --------------------------------------------------------------------------
+    local function ensureVacuumEquipped()
+        local vac = findVacuumTool()
+        if vac then
+            equipTool(vac)
+            return true
+        end
+
+        updateHUD("Traveling to Vacuum Rack", nil, "Pickup Required")
+        local pickupPrompt = findTrainPrompt("TrainEventAction", "PickupVacuum")
+        if not pickupPrompt or not pickupPrompt.Parent then
+            updateHUD("Vacuum Rack Missing!", nil, "Searching...")
+            return false
+        end
+
+        local rackPos = resolveWorldPosition(pickupPrompt.Parent)
+        if not rackPos then return false end
+
+        glideTo(rackPos + Vector3.new(0, 2.5, 0), CONFIG.TravelSpeed, 3.5)
+        task.wait(0.15)
+
+        updateHUD("Picking up Vacuum Tool", nil, "Firing Prompt")
+        firePrompt(pickupPrompt)
+
+        local deadline = os.clock() + 3.0
+        while os.clock() < deadline do
+            vac = findVacuumTool()
+            if vac then break end
+            Services.RunService.Heartbeat:Wait()
+        end
+
+        if vac then
+            equipTool(vac)
+            updateHUD("Vacuum Equipped!", nil, "Ready to Hunt")
+            task.wait(0.3)
+            return true
+        end
+        return false
+    end
+
+    -- --------------------------------------------------------------------------
+    -- [ STAGE 3A: GHOULER BOSS COMBAT HANDLER ]
+    -- --------------------------------------------------------------------------
+    local function getActiveGhoulerBoss()
+        local bossState = Services.ReplicatedStorage:FindFirstChild("GhostBossState")
+        if bossState then
+            local phase = bossState:GetAttribute("Phase")
+            local realm = bossState:GetAttribute("Realm")
+            if (phase == "Alive" or phase == "Spawning") and realm == "Town" and bossState:GetAttribute("BossId") ~= "" then
+                return bossState
+            end
+        end
+        return nil
+    end
+
+    local function fightGhoulerBoss(bossState)
+        local char, root = getAliveRig()
+        local bossGround = bossState:GetAttribute("Ground")
+        if not root or typeof(bossGround) ~= "Vector3" then return end
+
+        local vac = findVacuumTool()
+        if vac then equipTool(vac) end
+
+        local velocity = bossState:GetAttribute("Velocity")
+        local movedAt = tonumber(bossState:GetAttribute("MovedAt")) or workspace:GetServerTimeNow()
+        if typeof(velocity) == "Vector3" then
+            bossGround = bossGround + velocity * math.clamp(workspace:GetServerTimeNow() - movedAt, 0, 0.3)
+        end
+
+        local flatDiff = Vector3.new(root.Position.X - bossGround.X, 0, root.Position.Z - bossGround.Z)
+        local dir = flatDiff.Magnitude > 0.5 and flatDiff.Unit or Vector3.new(1, 0, 0)
+        local targetPos = bossGround + dir * 42 + Vector3.new(0, 3, 0)
+
+        local toTarget = targetPos - root.Position
+        if toTarget.Magnitude > 2 then
+            root.AssemblyLinearVelocity = toTarget.Unit * math.min(toTarget.Magnitude * 8, 50)
+        else
+            root.AssemblyLinearVelocity = Vector3.zero
+        end
+
+        root.CFrame = CFrame.lookAt(root.Position, Vector3.new(bossGround.X, root.Position.Y, bossGround.Z))
+
+        if Remotes.BossSuction and os.clock() - State.LastSuckTime >= 0.25 then
+            State.LastSuckTime = os.clock()
+            pcall(function()
+                Remotes.BossSuction:FireServer(true, (bossGround + Vector3.new(0, 8, 0) - root.Position).Unit)
+            end)
+        end
+    end
+
+    -- --------------------------------------------------------------------------
+    -- [ STAGE 3B: GHOST HUNTING (GROUND-LOCKED & SMOOTH TRACKING) ]
+    -- --------------------------------------------------------------------------
+    local function selectTargetGhost()
+        local ghostFolder = Services.Workspace:FindFirstChild("TrainGhostVisuals")
+        local _, root = getAliveRig()
+        if not ghostFolder or not root then return nil end
+
+        local bestGhost = nil
+        local bestScore = -math.huge
+
+        for _, ghost in ipairs(ghostFolder:GetChildren()) do
+            if ghost:GetAttribute("TrainGhost") and ghost:IsA("PVInstance") then
+                local ghostPos = ghost:GetPivot().Position
+                local dist = (ghostPos - root.Position).Magnitude
+
+                local name = ghost.Name:lower()
+                local rarityWeight = name:find("vengeful") and 300000 or (name:find("haunted") and 200000 or 100000)
+
+                local score = (CONFIG.GhostPriority == "Closest") and -dist or (rarityWeight - dist)
+                if score > bestScore then
+                    bestScore = score
+                    bestGhost = ghost
+                end
+            end
+        end
+        return bestGhost
+    end
+
+    local _lastStandoffCalc = 0
+    local _lastStandoffGhostPos = nil
+    local _cachedStandoffPos = nil
+
+    local function findClearVacuumStandoff(ghostPos, radius, playerPos)
+        local now = os.clock()
+        if _cachedStandoffPos and (now - _lastStandoffCalc < 0.25) and _lastStandoffGhostPos and (ghostPos - _lastStandoffGhostPos).Magnitude < 3.0 then
+            return _cachedStandoffPos
+        end
+
+        local char = LocalPlayer.Character
+        local ghostFolder = Services.Workspace:FindFirstChild("TrainGhostVisuals")
+        _vacuumRayParams.FilterDescendantsInstances = { char, ghostFolder }
+
+        local bestPos = nil
+        local bestScore = -math.huge
+
+        for i = 0, 15 do
+            local angle = i * (math.pi / 8)
+            local testPos = ghostPos + Vector3.new(math.cos(angle) * radius, 0, math.sin(angle) * radius)
+
+            local ray = Services.Workspace:Raycast(ghostPos, testPos - ghostPos, _vacuumRayParams)
+            local isClear = (ray == nil)
+
+            local distFromPlayer = (testPos - playerPos).Magnitude
+            local score = (isClear and 1000 or -10000) - (distFromPlayer * 15)
+
+            if score > bestScore then
+                bestScore = score
+                bestPos = testPos
+            end
+        end
+
+        _lastStandoffCalc = now
+        _lastStandoffGhostPos = ghostPos
+        _cachedStandoffPos = bestPos or (ghostPos + Vector3.new(0, 0, radius))
+        return _cachedStandoffPos
+    end
+
+    local function executeGhostCapture(ghost)
+        local char, root = getAliveRig()
+        if not ghost or not root then return end
+
+        local ghostName = ghost.Name
+        while ghost.Parent and isInForgottenTown() and getgenv().AutoPhantomExpress do
+            if CONFIG.AutoBoss and getActiveGhoulerBoss() then
+                break
+            end
+
+            local ghostPos = ghost:GetPivot().Position
+            local progress = math.clamp(tonumber(ghost:GetAttribute("ServerCaptureProgress")) or 0, 0, 1)
+
+            local radius = CONFIG.BaseStandoff
+            if progress >= 0.75 then
+                radius = 7
+            elseif progress >= 0.5 then
+                radius = 10
+            end
+
+            local standPos = findClearVacuumStandoff(ghostPos, radius, root.Position)
+            local floorY = getGroundElevation(standPos.X, standPos.Z, ghostPos.Y)
+            local targetY = floorY + CONFIG.HeightAboveGround
+            local targetPosition = Vector3.new(standPos.X, targetY, standPos.Z)
+
+            local delta = targetPosition - root.Position
+            local flatDist = Vector2.new(delta.X, delta.Z).Magnitude
+            local vertDist = math.abs(delta.Y)
+
+            updateHUD(string.format("Vacuuming %s", ghostName), nil, string.format("Progress: %d%%", math.floor(progress * 100)))
+
+            if flatDist > 25 then
+                root.AssemblyLinearVelocity = delta.Unit * CONFIG.TravelSpeed
+            elseif flatDist > 0.8 or vertDist > 1.0 then
+                local smoothSpeed = math.clamp(flatDist * 6.5, CONFIG.LockMinSpeed, CONFIG.LockMaxSpeed)
+                local moveDir = Vector3.new(delta.X, delta.Y * 1.5, delta.Z).Unit
+                root.AssemblyLinearVelocity = moveDir * smoothSpeed
+            else
+                root.AssemblyLinearVelocity = Vector3.zero
+            end
+
+            root.CFrame = CFrame.lookAt(root.Position, Vector3.new(ghostPos.X, root.Position.Y, ghostPos.Z))
+
+            if Remotes.BossSuction and os.clock() - State.LastSuckTime >= 0.2 then
+                State.LastSuckTime = os.clock()
+                pcall(function()
+                    Remotes.BossSuction:FireServer(true, (ghostPos - root.Position).Unit)
+                end)
+            end
+
+            if progress >= 1.0 then break end
+            Services.RunService.Heartbeat:Wait()
+        end
+    end
+
+    -- --------------------------------------------------------------------------
+    -- [ STAGE 4: PRE-VERIFIED SOUL TRADING & RETURN ]
+    -- --------------------------------------------------------------------------
+    local function getSoulShopData()
+        local ok, r1, r2 = callTrainAction("Status")
+        local packet = (type(r2) == "table" and r2) or (type(r1) == "table" and r1)
+        if packet and type(packet.SoulShop) == "table" then
+            return packet.SoulShop
+        end
+        return nil
+    end
+
+    local function executeSoulTrading()
+        updateHUD("Checking Soul Balance...", nil, "Remote Pre-Check")
+        
+        local shopData = getSoulShopData()
+        local souls = shopData and tonumber(shopData.Souls) or 0
+        local cost = shopData and tonumber(shopData.Cost) or 100
+
+        if souls < cost then
+            updateHUD("Skipping Shop", nil, string.format("Insufficient: %d/%d Souls", souls, cost))
+            task.wait(0.5)
+            return false
+        end
+
+        updateHUD("Traveling to Soul Shop", nil, string.format("Balance: %d Souls", souls))
+        local shopPrompt = findTrainPrompt("TrainEventAction", "OpenSoulShop")
+        if shopPrompt and shopPrompt.Parent then
+            local shopPos = resolveWorldPosition(shopPrompt.Parent)
+            if shopPos then
+                glideTo(shopPos + Vector3.new(0, 2.5, 0), CONFIG.TravelSpeed, 4)
+            end
+            firePrompt(shopPrompt)
+            task.wait(0.2)
+        end
+
+        local ok, res1, res2 = callTrainAction("OpenSoulShop")
+        local activeData = (type(res2) == "table" and res2.SoulShop)
+                        or (type(res1) == "table" and res1.SoulShop)
+                        or shopData
+
+        local tradeCount = 0
+        while activeData and (tonumber(activeData.Souls) or 0) >= (tonumber(activeData.Cost) or 100) and tradeCount < CONFIG.MaxTradesPerRun and getgenv().AutoPhantomExpress do
+            local tradeCost = activeData.Cost
+            local success, tradeRes, updatedData = callTrainAction("TradeSouls", tradeCost)
+
+            if not success or tradeRes == false then
+                break
+            end
+
+            tradeCount = tradeCount + 1
+            State.SoulsTraded = State.SoulsTraded + 1
+            updateHUD("Trading Souls...", string.format("Rides: %d | Purchases: %d", State.RidesCompleted, State.SoulsTraded), string.format("Bought Reward #%d", tradeCount))
+
+            if type(updatedData) == "table" and updatedData.SoulShop then
+                activeData = updatedData.SoulShop
+            elseif type(tradeRes) == "table" and tradeRes.Souls ~= nil then
+                activeData.Souls = tradeRes.Souls
+            else
+                activeData.Souls = (tonumber(activeData.Souls) or 0) - tradeCost
+            end
+
+            task.wait(CONFIG.SoulTradeDelay)
+        end
+
+        updateHUD("Trading Finished", nil, string.format("Bought %d items", tradeCount))
+        task.wait(0.3)
+        return true
+    end
+
+    local function concludeTownEvent()
+        if getgenv().AutoSoulTrade then
+            executeSoulTrading()
+        end
+
+        updateHUD("Exiting Town", nil, "Moving to Return Rail")
+
+        local exitStartTime = os.clock()
+        local maxExitDuration = 35.0
+        local retryCount = 0
+
+        -- Active Retry Loop: Guaranteed Exit despite rubberbanding
+        while (os.clock() - exitStartTime) < maxExitDuration and isInForgottenTown() do
+            if not getgenv().config.autoPhantomExpress then break end
+
+            retryCount = retryCount + 1
+            updateHUD("Exiting Town", string.format("Return Attempt #%d", retryCount), "Verifying Return Rail")
+
+            -- Step A: Re-acquire Return Prompt and target coordinates
+            local returnPrompt = findTrainPrompt("Name", "TrainReturn")
+            local returnPos = nil
+            if returnPrompt and returnPrompt.Parent then
+                returnPos = projectOnRail(returnPrompt, "ReturnRailStart", "ReturnRailEnd")
+            end
+
+            -- Step B: Glide to Return Rail
+            if returnPos then
+                glideTo(returnPos + Vector3.new(0, 2.5, 0), CONFIG.TravelSpeed, 3.0)
+            end
+
+            -- Step C: Anti-rubberband position verification
+            local _, curRoot = getAliveRig()
+            local atRail = false
+            if curRoot and returnPos then
+                atRail = (curRoot.Position - (returnPos + Vector3.new(0, 2.5, 0))).Magnitude <= 8.0
+            end
+
+            if atRail or not returnPos then
+                -- Step D: Trigger prompt and invoke return remote
+                if returnPrompt and returnPrompt.Parent and returnPrompt.Enabled then
+                    firePrompt(returnPrompt)
+                end
+
+                callTrainAction("Return")
+
+                -- Step E: Verification window (wait up to 3.0s to confirm departure)
+                local verifyDeadline = os.clock() + 3.0
+                while os.clock() < verifyDeadline and isInForgottenTown() do
+                    local phase = getTrainPhase()
+                    if phase == "Returning" or phase == "Respawning" or phase == "Station" then
+                        break
+                    end
+                    Services.RunService.Heartbeat:Wait()
+                end
+            else
+                -- Rubberbanded away from rail! Brief pause before re-approaching
+                task.wait(0.3)
+            end
+        end
+
+        -- Step F: Wait for return train ride to complete transit
+        local transitDeadline = os.clock() + 25.0
+        while os.clock() < transitDeadline and isPlayerOnTrain() do
+            local phase = getTrainPhase()
+            updateHUD("Returning to Station", "Riding train back...", "Phase: " .. tostring(phase))
+            Services.RunService.Heartbeat:Wait()
+        end
+
+        local char, root, hum = getAliveRig()
+        if hum then pcall(function() hum:UnequipTools() end) end
+        if root then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
+        
+        State.TownSettled = false
+        updateHUD("Returned to Station", nil, "Cycle Finished")
+    end
+
+    -- --------------------------------------------------------------------------
+    -- [ MANAGER PUBLIC INTERFACE ]
+    -- --------------------------------------------------------------------------
+    PhantomExpressManager = {
+        State = State,
+        IsInTown = isInForgottenTown,
+        IsAboard = isPlayerOnTrain,
+        IsInTrainEvent = function(self)
+            return isInForgottenTown() or isPlayerOnTrain()
+        end,
+        GetStatus = function(self)
+            return State.CurrentStatus, State.CurrentDetail, State.CurrentInfo
+        end,
+        IsLocked = function(self)
+            return State.IsBusy or isInForgottenTown() or isPlayerOnTrain()
+        end,
+        HasWork = function(self)
+            if not getgenv().config.autoPhantomExpress then return false end
+            if isInForgottenTown() or isPlayerOnTrain() then return true end
+            if not hasTicketAccess() then return false end
+            local trainState = pollTrainStatus()
+            local serverTime = workspace:GetServerTimeNow()
+            local departureTime = trainState and tonumber(trainState.DepartureAt) or 0
+            if State.DoneDeparture and departureTime > 0 and State.DoneDeparture == departureTime then
+                return true
+            end
+            if trainState and (trainState.ArrivalOpen == true or trainState.AtStation == true or serverTime < departureTime) then
+                return true
+            end
+            local boardPrompt = findTrainPrompt("Name", "TrainBoard")
+            if boardPrompt and boardPrompt.Parent and boardPrompt.Enabled then
+                return true
+            end
+            return false
+        end,
+        HasSoulWork = function(self)
+            if not getgenv().config.autoSoulTrade then return false end
+            if not isInForgottenTown() then return false end
+            local shopData = getSoulShopData()
+            local souls = shopData and tonumber(shopData.Souls) or 0
+            local cost = shopData and tonumber(shopData.Cost) or 100
+            return souls >= cost
+        end,
+        Abort = function(self)
+            State.IsBusy = false
+            local _, root, hum = getAliveRig()
+            if root then
+                root.AssemblyLinearVelocity = Vector3.zero
+                root.AssemblyAngularVelocity = Vector3.zero
+            end
+            if hum then
+                pcall(function() hum:UnequipTools() end)
+            end
+            updateHUD("Aborted / Idle", nil, "Stopped")
+        end,
+        Process = function(self)
+            if not getgenv().config.autoPhantomExpress then return end
+            local char, root, hum = getAliveRig()
+            if not char or not root or not hum or State.IsBusy then return end
+
+            State.IsBusy = true
+            applyRigProtection(char)
+
+            local phase = getTrainPhase()
+
+            -- SCENARIO 1: INSIDE THE FORGOTTEN TOWN
+            if isInForgottenTown() then
+                if not State.TownSettled then
+                    waitForArrivalCutscene()
+                    State.TownSettled = true
+                end
+
+                local hasVacuum = ensureVacuumEquipped()
+                if hasVacuum then
+                    local ghouler = CONFIG.AutoBoss and getActiveGhoulerBoss()
+                    if ghouler then
+                        updateHUD("Vacuuming Ghouler Boss!", nil, "Boss Battle Active")
+                        fightGhoulerBoss(ghouler)
+                    else
+                        local targetGhost = selectTargetGhost()
+                        if targetGhost and targetGhost.Parent then
+                            executeGhostCapture(targetGhost)
+                        else
+                            concludeTownEvent()
+                            task.wait(1.5)
+                        end
+                    end
+                else
+                    task.wait(1.0)
+                end
+
+            -- SCENARIO 2: SEATED ON THE TRAIN / IN TRANSIT
+            elseif isPlayerOnTrain() then
+                State.TownSettled = false
+                updateHUD("On Phantom Express", "Riding train...", "Phase: " .. tostring(phase))
+                task.wait(0.5)
+
+            -- SCENARIO 3: OUTSIDE ON PLATFORM / STATION
+            else
+                State.TownSettled = false
+                attemptTrainBoarding()
+                task.wait(1.0)
+            end
+
+            State.IsBusy = false
+        end
+    }
+end
+
+
 -- [ TASK PRIORITY ARBITRATOR ]
 -- ==============================================================================
 PriorityManager = {
@@ -4337,20 +5457,34 @@ PriorityManager = {
     List = {
         "Auto Boss",
         "Auto Ghost Dog",
+        "Auto Phantom Express",
+        "Auto Soul Trade",
+        "Auto Steal Halloween Eggs",
         "Auto Steal",
         "Candy Cane Farm",
         "Auto Pumpkin",
         "Auto Fishing",
-        "Auto Buy Halloween Egg",
         "Enchanted / Bloom Event",
-        "Auto Upgrades",
         "Auto Treadmill"
     },
     TaskAliases = {
         ["Steal"] = "Auto Steal",
         ["Auto Steal"] = "Auto Steal",
-        ["HalloweenSteal"] = "Halloween Steal",
-        ["Halloween Steal"] = "Halloween Steal",
+        ["HalloweenSteal"] = "Auto Steal Halloween Eggs",
+        ["Halloween Steal"] = "Auto Steal Halloween Eggs",
+        ["Auto Steal Halloween Eggs"] = "Auto Steal Halloween Eggs",
+        ["AutoHalloweenSteal"] = "Auto Steal Halloween Eggs",
+        ["PhantomExpress"] = "Auto Phantom Express",
+        ["Phantom Express"] = "Auto Phantom Express",
+        ["Auto Phantom Express"] = "Auto Phantom Express",
+        ["AutoPhantomExpress"] = "Auto Phantom Express",
+        ["Train"] = "Auto Phantom Express",
+        ["Auto Train"] = "Auto Phantom Express",
+        ["SoulTrade"] = "Auto Soul Trade",
+        ["Soul Trade"] = "Auto Soul Trade",
+        ["Auto Soul Trade"] = "Auto Soul Trade",
+        ["AutoSoulTrade"] = "Auto Soul Trade",
+        ["Auto Soul Trade In"] = "Auto Soul Trade",
         ["Boss"] = "Auto Boss",
         ["AutoBoss"] = "Auto Boss",
         ["Auto Boss"] = "Auto Boss",
@@ -4366,15 +5500,10 @@ PriorityManager = {
         ["Fishing"] = "Auto Fishing",
         ["AutoFishing"] = "Auto Fishing",
         ["Auto Fishing"] = "Auto Fishing",
-        ["BuyHalloweenEgg"] = "Auto Buy Halloween Egg",
-        ["AutoBuyHalloweenEgg"] = "Auto Buy Halloween Egg",
-        ["Auto Buy Halloween Egg"] = "Auto Buy Halloween Egg",
         ["Bloom"] = "Enchanted / Bloom Event",
         ["Bloom Event"] = "Enchanted / Bloom Event",
         ["Enchanted"] = "Enchanted / Bloom Event",
         ["Enchanted / Bloom Event"] = "Enchanted / Bloom Event",
-        ["Upgrades"] = "Auto Upgrades",
-        ["Auto Upgrades"] = "Auto Upgrades",
         ["Treadmill"] = "Auto Treadmill",
         ["Auto Treadmill"] = "Auto Treadmill"
     }
@@ -4384,15 +5513,14 @@ function PriorityManager:Initialize(savedPriorities)
     local canonicalList = {
         "Auto Boss",
         "Auto Ghost Dog",
-        "Auto Train",
-        "Auto Vacuum",
+        "Auto Phantom Express",
+        "Auto Soul Trade",
+        "Auto Steal Halloween Eggs",
         "Auto Steal",
         "Candy Cane Farm",
         "Auto Pumpkin",
         "Auto Fishing",
-        "Auto Buy Halloween Egg",
         "Enchanted / Bloom Event",
-        "Auto Upgrades",
         "Auto Treadmill"
     }
 
@@ -4447,8 +5575,12 @@ function PriorityManager:Acquire(taskName, maxDuration)
     maxDuration = maxDuration or 15.0
 
     if not self:IsLocked() then
+        if resolved ~= "Auto Treadmill" and resolved ~= "Treadmill" then
+            hopOffTreadmill()
+        end
         self.ActiveTask = resolved
         self.ActiveTaskExpiresAt = os.clock() + maxDuration
+        self:InvalidateCache()
         return true
     elseif self.ActiveTask == resolved then
         self.ActiveTaskExpiresAt = math.max(self.ActiveTaskExpiresAt, os.clock() + maxDuration)
@@ -4466,13 +5598,19 @@ function PriorityManager:Release(taskName)
     if self.ActiveTask == resolved or self.ActiveTask == taskName then
         self.ActiveTask = nil
         self.ActiveTaskExpiresAt = 0
+        self:InvalidateCache()
     end
 end
 
 function PriorityManager:GetTaskDimension(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
-    if resolved == "Auto Boss" or resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Halloween Steal" 
-       or resolved == "Auto Ghost Dog" or resolved == "Auto Fishing" or resolved == "Auto Buy Halloween Egg" then
+    if resolved == "Auto Phantom Express" or resolved == "Auto Soul Trade" then
+        if isInTrainEvent() then
+            return "Town"
+        end
+        return "Halloween"
+    elseif resolved == "Auto Boss" or resolved == "Candy Cane Farm" or resolved == "Auto Pumpkin" or resolved == "Auto Steal Halloween Eggs" 
+       or resolved == "Auto Ghost Dog" or resolved == "Auto Fishing" then
         return "Halloween"
     elseif resolved == "Auto Steal" or resolved == "Enchanted / Bloom Event" or resolved == "Auto Treadmill" then
         return "Normal"
@@ -4486,16 +5624,12 @@ function PriorityManager:IsTaskEnabled(taskName)
         return getgenv().config.autoBossEvent == true
     elseif resolved == "Auto Ghost Dog" then
         return getgenv().config.autoGhostDog == true and not isHalloweenMapClosed()
-    elseif resolved == "Halloween Steal" then
+    elseif resolved == "Auto Phantom Express" then
+        return getgenv().config.autoPhantomExpress == true
+    elseif resolved == "Auto Soul Trade" then
+        return getgenv().config.autoSoulTrade == true
+    elseif resolved == "Auto Steal Halloween Eggs" then
         return getgenv().InstantStealHalloween == true and not isHalloweenMapClosed()
-    elseif resolved == "Halloween Steal" then
-        if isHalloweenMapClosed() or getgenv().InstantStealHalloween ~= true then return false end
-        if isCarryingEgg and isCarryingEgg() then return true end
-        if HalloweenStealManager and HalloweenStealManager.State and HalloweenStealManager.State.isBusy then return true end
-        if HalloweenStealManager and HalloweenStealManager.SelectTargetEgg then
-            return HalloweenStealManager.SelectTargetEgg() ~= nil
-        end
-        return false
     elseif resolved == "Auto Steal" then
         return isStealEnabled() and not isMapClosed()
     elseif resolved == "Candy Cane Farm" then
@@ -4504,14 +5638,10 @@ function PriorityManager:IsTaskEnabled(taskName)
         return getgenv().config.autoPumpkin == true and not isHalloweenMapClosed()
     elseif resolved == "Auto Fishing" then
         return getgenv().config.autoFishing == true and not isHalloweenMapClosed()
-    elseif resolved == "Auto Buy Halloween Egg" then
-        return getgenv().config.autoBuyHalloweenEgg == true
     elseif resolved == "Enchanted / Bloom Event" then
         return (getgenv().config.autoCatchButterfly == true or getgenv().config.autoWispQuest == true or getgenv().config.autoTradeUp == true or getgenv().config.autoCraftEssence == true) and not isMapClosed()
-    elseif resolved == "Auto Upgrades" then
-        return (getgenv().config.autoUpgradeTreadmill == true or getgenv().config.autoUpgradeBase == true)
     elseif resolved == "Auto Treadmill" then
-        return getgenv().config.autoTreadmill == true and not isMapClosed()
+        return getgenv().config.autoTreadmill == true
     end
     return false
 end
@@ -4525,6 +5655,21 @@ function PriorityManager:HasWork(taskName)
     elseif resolved == "Auto Ghost Dog" then
         return GhostDogManager ~= nil and GhostDogManager:HasWork()
 
+    elseif resolved == "Auto Phantom Express" then
+        return PhantomExpressManager ~= nil and PhantomExpressManager:HasWork()
+
+    elseif resolved == "Auto Soul Trade" then
+        return PhantomExpressManager ~= nil and PhantomExpressManager:HasSoulWork()
+
+    elseif resolved == "Auto Steal Halloween Eggs" then
+        if isHalloweenMapClosed() or getgenv().InstantStealHalloween ~= true then return false end
+        if isCarryingEgg and isCarryingEgg() then return true end
+        if HalloweenStealManager and HalloweenStealManager.State and HalloweenStealManager.State.isBusy then return true end
+        if HalloweenStealManager and HalloweenStealManager.SelectTargetEgg then
+            return HalloweenStealManager.SelectTargetEgg() ~= nil
+        end
+        return false
+
     elseif resolved == "Auto Steal" then
         if isMapClosed() or not isStealEnabled() then return false end
         if isNormalStealPanelTarget() then return true end
@@ -4533,7 +5678,6 @@ function PriorityManager:HasWork(taskName)
             return getBestEgg() ~= nil
         end
         return false
-
 
     elseif resolved == "Candy Cane Farm" then
         if isHalloweenMapClosed() or getgenv().config.autoCandyCane ~= true then return false end
@@ -4557,7 +5701,6 @@ function PriorityManager:HasWork(taskName)
         if HalloweenPumpkinManager and (HalloweenPumpkinManager.IsBusy or HalloweenPumpkinManager:IsCarrying()) then
             return true
         end
-        -- Authoritative Pumpkin Moon event gating (stops infinite portal enter/exit oscillation)
         if HalloweenPumpkinManager and HalloweenPumpkinManager.IsEventActive and not HalloweenPumpkinManager:IsEventActive() then
             return false
         end
@@ -4571,11 +5714,6 @@ function PriorityManager:HasWork(taskName)
 
     elseif resolved == "Auto Fishing" then
         return HalloweenFishingManager ~= nil and HalloweenFishingManager:HasWork()
-
-    elseif resolved == "Auto Buy Halloween Egg" then
-        if getgenv().config.autoBuyHalloweenEgg ~= true then return false end
-        local inHalloween = HalloweenPortalManager and HalloweenPortalManager.IsInHalloweenDimension()
-        return inHalloween and (os.clock() >= (State.halloweenEggBuyCooldown or 0))
 
     elseif resolved == "Enchanted / Bloom Event" then
         if isMapClosed() then return false end
@@ -4593,16 +5731,19 @@ function PriorityManager:HasWork(taskName)
         end
         return false
 
-    elseif resolved == "Auto Upgrades" then
-        if not (getgenv().config.autoUpgradeTreadmill or getgenv().config.autoUpgradeBase) then return false end
-        return os.clock() >= State.treadmillUpgradeCooldown or os.clock() >= State.baseUpgradeCooldown
-
     elseif resolved == "Auto Treadmill" then
-        if isMapClosed() or getgenv().config.autoTreadmill ~= true then return false end
-        return true
+        return getgenv().config.autoTreadmill == true
     end
 
     return false
+end
+
+PriorityManager._lastTopTask = nil
+PriorityManager._lastTopTaskTime = 0
+
+function PriorityManager:InvalidateCache()
+    self._lastTopTask = nil
+    self._lastTopTaskTime = 0
 end
 
 function PriorityManager:GetTopWantedTask()
@@ -4611,37 +5752,42 @@ function PriorityManager:GetTopWantedTask()
         return self.ActiveTask
     end
 
+    local now = os.clock()
+    if self._lastTopTaskTime > 0 and (now - self._lastTopTaskTime) < 0.15 then
+        return self._lastTopTask
+    end
+
+    local topTask = nil
+
     -- Auto Boss mid-run (portal entry / arena / exit) can never be preempted
     if HalloweenBossManager and HalloweenBossManager:IsLocked() then
-        return "Auto Boss"
-    end
-    if isNormalStealPanelTarget() then
-        return "Auto Steal"
-    end
-
-    if getgenv().InstantStealHalloween and HalloweenStealManager and HalloweenStealManager.State and HalloweenStealManager.State.isBusy then
-        return "Halloween Steal"
-    end
-    if isHoldingEgg() or State.isStealingActive then
-        return "Auto Steal"
-    end
-    if HalloweenPumpkinManager and (HalloweenPumpkinManager.IsBusy or HalloweenPumpkinManager:IsCarrying()) then
-        return "Auto Pumpkin"
-    end
-    if GhostDogManager and GhostDogManager.IsActive then
-        return "Auto Ghost Dog"
-    end
-    if HalloweenFishingManager and HalloweenFishingManager.IsActive then
-        return "Auto Fishing"
-    end
-
-    for _, taskName in ipairs(self.List) do
-        if self:IsTaskEnabled(taskName) and self:HasWork(taskName) then
-            return taskName
+        topTask = "Auto Boss"
+    elseif PhantomExpressManager and PhantomExpressManager:IsLocked() then
+        topTask = "Auto Phantom Express"
+    elseif isNormalStealPanelTarget() then
+        topTask = "Auto Steal"
+    elseif getgenv().InstantStealHalloween and HalloweenStealManager and HalloweenStealManager.State and HalloweenStealManager.State.isBusy then
+        topTask = "Auto Steal Halloween Eggs"
+    elseif isHoldingEgg() or State.isStealingActive then
+        topTask = "Auto Steal"
+    elseif HalloweenPumpkinManager and (HalloweenPumpkinManager.IsBusy or HalloweenPumpkinManager:IsCarrying()) then
+        topTask = "Auto Pumpkin"
+    elseif GhostDogManager and GhostDogManager.IsActive then
+        topTask = "Auto Ghost Dog"
+    elseif HalloweenFishingManager and HalloweenFishingManager.IsActive then
+        topTask = "Auto Fishing"
+    else
+        for _, taskName in ipairs(self.List) do
+            if self:IsTaskEnabled(taskName) and self:HasWork(taskName) then
+                topTask = taskName
+                break
+            end
         end
     end
 
-    return nil
+    self._lastTopTask = topTask
+    self._lastTopTaskTime = now
+    return topTask
 end
 
 function PriorityManager:CanRun(taskName)
@@ -4651,11 +5797,6 @@ function PriorityManager:CanRun(taskName)
     end
 
     local resolved = self.TaskAliases[taskName] or taskName
-
-    -- Independent task: Auto Upgrades never contends for the character
-    if resolved == "Auto Upgrades" then
-        return self:IsTaskEnabled("Auto Upgrades")
-    end
 
     -- If another task holds the character lock, no other task can run
     if self:IsLocked() and self.ActiveTask ~= resolved then
@@ -4708,25 +5849,44 @@ function WorkerScheduler:Register(name, interval, runFn)
 end
 
 function WorkerScheduler:Start()
-    if self.Connection then return end
-    self.Connection = Services.RunService.Heartbeat:Connect(function(dt)
-        if not self.IsActive then return end
-        for _, t in ipairs(self.Tasks) do
-            t.Gap = t.Gap + dt
-            if t.Hold > 0 then
-                t.Hold = t.Hold - dt
-            elseif not t.Running and t.Gap >= t.Interval then
-                t.Gap = 0
-                t.Running = true
-                task.spawn(function()
-                    local ok, err = pcall(t.Run)
-                    t.Running = false
-                    if not ok and err then
-                        t.Hold = 3
+    if self.IsRunningLoop then return end
+    self.IsRunningLoop = true
+    task.spawn(function()
+        local lastPrune = 0
+        while self.IsActive do
+            local dt = task.wait(0.05)
+            local now = os.clock()
+
+            -- Periodic Blacklist Memory Pruning (every 30s)
+            if now - lastPrune >= 30.0 then
+                lastPrune = now
+                if State and State.blacklistedEggs then
+                    for uid, exp in pairs(State.blacklistedEggs) do
+                        if now > exp then
+                            State.blacklistedEggs[uid] = nil
+                        end
                     end
-                end)
+                end
+            end
+
+            for _, t in ipairs(self.Tasks) do
+                t.Gap = t.Gap + dt
+                if t.Hold > 0 then
+                    t.Hold = t.Hold - dt
+                elseif not t.Running and t.Gap >= t.Interval then
+                    t.Gap = 0
+                    t.Running = true
+                    task.spawn(function()
+                        local ok, err = pcall(t.Run)
+                        t.Running = false
+                        if not ok and err then
+                            t.Hold = 3
+                        end
+                    end)
+                end
             end
         end
+        self.IsRunningLoop = false
     end)
 end
 
@@ -5680,7 +6840,7 @@ end
 -- [ WORKER SCHEDULER TASK REGISTRATIONS & DIMENSION SUPERVISOR ]
 -- ==============================================================================
 
-WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
+WorkerScheduler:Register("CandyCaneFarm", 0.15, function()
     if not getgenv().config.autoCandyCane or isHalloweenMapClosed() then
         PriorityManager:Release("CandyCane")
         return
@@ -5707,7 +6867,7 @@ WorkerScheduler:Register("CandyCaneFarm", 0.05, function()
     end
 end)
 
-WorkerScheduler:Register("HalloweenPumpkin", 0.05, function()
+WorkerScheduler:Register("HalloweenPumpkin", 0.15, function()
     if not getgenv().config.autoPumpkin or isHalloweenMapClosed() then
         PriorityManager:Release("Pumpkin")
         return
@@ -5734,7 +6894,7 @@ WorkerScheduler:Register("HalloweenPumpkin", 0.05, function()
     end
 end)
 
-WorkerScheduler:Register("HalloweenBoss", 0.05, function()
+WorkerScheduler:Register("HalloweenBoss", 0.15, function()
     if not getgenv().config.autoBossEvent then
         PriorityManager:Release("Boss")
         return
@@ -5755,7 +6915,7 @@ WorkerScheduler:Register("HalloweenBoss", 0.05, function()
     end
 end)
 
-WorkerScheduler:Register("GhostDog", 0.1, function()
+WorkerScheduler:Register("GhostDog", 0.2, function()
     if not getgenv().config.autoGhostDog or isHalloweenMapClosed() then return end
     if not PriorityManager:CanRun("GhostDog") then return end
     if not GhostDogManager:HasWork() then return end
@@ -5771,7 +6931,7 @@ WorkerScheduler:Register("GhostDog", 0.1, function()
     pcall(function() GhostDogManager:Process() end)
 end)
 
-WorkerScheduler:Register("HalloweenFishing", 0.1, function()
+WorkerScheduler:Register("HalloweenFishing", 0.2, function()
     if not getgenv().config.autoFishing or isHalloweenMapClosed() then return end
     if not PriorityManager:CanRun("Fishing") then return end
     if not HalloweenFishingManager:HasWork() then return end
@@ -5787,10 +6947,38 @@ WorkerScheduler:Register("HalloweenFishing", 0.1, function()
     pcall(function() HalloweenFishingManager:Process() end)
 end)
 
+WorkerScheduler:Register("PhantomExpress", 0.2, function()
+    if not getgenv().config.autoPhantomExpress then return end
+    if not PriorityManager:CanRun("Auto Phantom Express") then return end
+    if not PhantomExpressManager:HasWork() then return end
+
+    -- Train & Town Dimension Independence:
+    -- If player is already aboard train or in Forgotten Town, run task directly without portal checks!
+    if isInTrainEvent() then
+        if PriorityManager:Acquire("Auto Phantom Express", 25.0) then
+            pcall(function() PhantomExpressManager:Process() end)
+            PriorityManager:Release("Auto Phantom Express")
+        end
+        return
+    end
+
+    if not HalloweenPortalManager.IsInHalloweenDimension() then
+        if PriorityManager:Acquire("Auto Phantom Express", 10.0) then
+            HalloweenPortalManager.EnterDimension(5.0)
+            PriorityManager:Release("Auto Phantom Express")
+        end
+        return
+    end
+
+    if PriorityManager:Acquire("Auto Phantom Express", 25.0) then
+        pcall(function() PhantomExpressManager:Process() end)
+        PriorityManager:Release("Auto Phantom Express")
+    end
+end)
+
 WorkerScheduler:Register("AutoBuyHalloweenEgg", 1.5, function()
     if not getgenv().config.autoBuyHalloweenEgg then return end
     if not HalloweenPortalManager.IsInHalloweenDimension() then return end
-    if not PriorityManager:CanRun("BuyHalloweenEgg") then return end
 
     if os.clock() >= (State.halloweenEggBuyCooldown or 0) then
         State.halloweenEggBuyCooldown = os.clock() + 3.0
@@ -5799,7 +6987,6 @@ WorkerScheduler:Register("AutoBuyHalloweenEgg", 1.5, function()
 end)
 
 WorkerScheduler:Register("AutoUpgrades", 6.0, function()
-    if not PriorityManager:CanRun("Upgrades") then return end
     if getgenv().config.autoUpgradeTreadmill then tryUpgradeTreadmill() end
     if getgenv().config.autoUpgradeBase then tryUpgradeBase() end
 end)
@@ -5821,6 +7008,10 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
     local char = LocalPlayer.Character
     if not char then return end
 
+    -- Train & Town Dimension Independence:
+    -- When player is aboard Phantom Express or in Forgotten Town, dimension supervisor must NOT interfere
+    if isInTrainEvent() then return end
+
     local inHalloween = HalloweenPortalManager.IsInHalloweenDimension()
     local topTask = PriorityManager:GetTopWantedTask()
 
@@ -5839,6 +7030,10 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
         if targetDim == "Halloween" and not inHalloween then
             hopOffTreadmill()
             HalloweenPortalManager.EnterDimension(5.0)
+            return
+        elseif targetDim == "Normal" and inHalloween then
+            hopOffTreadmill()
+            HalloweenPortalManager.ExitDimension(12.0)
             return
         end
     end
@@ -5944,7 +7139,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
         end
     end
 
-    -- 2. Treadmill Idle Execution
+    -- 2. Treadmill Idle Execution (Normal Dimension on Plot Treadmill)
     local isStealBusy = State.isStealingActive or isHoldingEgg()
     local canTreadmill = getgenv().config.autoTreadmill and not isStealBusy and PriorityManager:CanRun("Treadmill")
 
@@ -5997,6 +7192,14 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                 State.treadmillFailCount = 0
             end
         end
+    else
+        -- Clean dismount when treadmill is no longer active but character is still anchored
+        if not canTreadmill and getgenv().config.autoTreadmill then
+            local _, curRoot = getAliveRig()
+            if curRoot and curRoot.Anchored then
+                hopOffTreadmill()
+            end
+        end
     end
 end)
 
@@ -6006,7 +7209,7 @@ WorkerScheduler:Start()
 -- ==============================================================================
 -- [ GUI INITIALIZATION & CONTROLS BINDINGS VIA GUILIB ]
 -- ==============================================================================
-local SyntaxisLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/tenobarillas-ship-it/GUILib/main/SyntaxisLib.lua"))()
+local SyntaxisLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/quantumdingle123/GUILib/main/SyntaxisLib.lua"))()
 
 Window = SyntaxisLib:CreateWindow({
     Title = "Syntaxis",
@@ -6106,6 +7309,23 @@ end)
 halloweenCategory:CreateDropdown("Min Rarity", "Only steal Halloween eggs with rarity >= this", rarityList, currentSettings.HalloweenMinRarity, function(selected)
     getgenv().config.halloweenMinRarity = selected
     currentSettings.HalloweenMinRarity = selected
+    saveStuff()
+end)
+
+halloweenCategory:CreateToggle("Auto Phantom Express", "Board train, hunt ghosts & defeat Ghouler Boss", currentSettings.AutoPhantomExpress, function(state)
+    getgenv().config.autoPhantomExpress = state
+    getgenv().AutoPhantomExpress = state
+    currentSettings.AutoPhantomExpress = state
+    saveStuff()
+    if not state and PhantomExpressManager and PhantomExpressManager.Abort then
+        PhantomExpressManager:Abort()
+    end
+end)
+
+halloweenCategory:CreateToggle("Auto Soul Trade", "Auto trade collected souls in Forgotten Town", currentSettings.AutoSoulTrade, function(state)
+    getgenv().config.autoSoulTrade = state
+    getgenv().AutoSoulTrade = state
+    currentSettings.AutoSoulTrade = state
     saveStuff()
 end)
 
