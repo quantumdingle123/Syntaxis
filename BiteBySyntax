@@ -1928,44 +1928,101 @@ getgenv().HalloweenAreaManager = HalloweenAreaManager
 -- ==============================================================================
 -- [ HALLOWEEN COMBAT MANAGER - MONSTER FARM & WEAPON SWAPPER ]
 -- ==============================================================================
-HalloweenCombatManager = {
-    ToolIndex = 1,
-    LastSwapTime = 0,
-    IsHolding = false,
-    HoverHeight = 3.0,
-    SwapDelay = 0.08
+-- ==============================================================================
+-- [ COMBAT WEAPON ENGINE & BAT SWITCHER (HOT.LUA COMPATIBLE) ]
+-- ==============================================================================
+local COMBAT_WEAPON_KEYWORDS = {
+    "bat", "katana", "axe", "staff", "club", "hammer", 
+    "sword", "blade", "scythe", "mace", "spear", "slapper", "dagger", "halberd"
 }
 
-function HalloweenCombatManager:GetWeaponList()
+local function isCombatWeapon(tool)
+    if typeof(tool) ~= "Instance" or not tool:IsA("Tool") then
+        return false
+    end
+
+    local name = string.lower(tool.Name)
+
+    -- 1. Strictly exclude non-weapon tools (Rods, Vacuums, Eggs, Scramblers, Nets, Potions, Satchels)
+    if name:find("rod", 1, true) or name:find("fishing", 1, true) or name:find("vacuum", 1, true) 
+       or name:find("egg", 1, true) or name:find("scrambler", 1, true) or name:find("mutator", 1, true) 
+       or name:find("potion", 1, true) or name:find("net", 1, true) or name:find("satchel", 1, true) then
+        return false
+    end
+
+    if tool:GetAttribute("EggUid") ~= nil or tool:GetAttribute("IsVacuum") == true 
+       or tool:GetAttribute("IsRod") == true or tool:GetAttribute("IsFishingRod") == true then
+        return false
+    end
+
+    local itemType = tool:GetAttribute("ItemType")
+    if itemType ~= nil and itemType ~= "Gear" and itemType ~= "Bat" and itemType ~= "Weapon" then
+        return false
+    end
+
+    -- 2. Official game attributes
+    if tool:GetAttribute("IsBat") == true or tool:GetAttribute("IsWeapon") == true then
+        return true
+    end
+
+    -- 3. Game Gear definition lookup (Gears.Directory[gearName].BatControllerData)
+    local gearName = tool:GetAttribute("GearName")
+    if type(gearName) == "string" then
+        pcall(function()
+            local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
+            local datas = packages and packages:FindFirstChild("Datas")
+            local gearsMod = datas and datas:FindFirstChild("Gears")
+            if gearsMod then
+                local gearsData = require(gearsMod)
+                local dir = (type(gearsData) == "table" and gearsData.Directory) or gearsData
+                local gInfo = dir and dir[gearName]
+                if type(gInfo) == "table" and (gInfo.BatControllerData ~= nil or gInfo.ToolController == "Slap") then
+                    return true
+                end
+            end
+        end)
+    end
+
+    -- 4. Keyword matching against known melee weapon names
+    for _, kw in ipairs(COMBAT_WEAPON_KEYWORDS) do
+        if string.find(name, kw, 1, true) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function getAvailableCombatWeapons()
     local weapons = {}
-    local char = LocalPlayer.Character
-    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    local seen = {}
 
     local function scan(container)
         if not container then return end
         for _, item in ipairs(container:GetChildren()) do
-            if item:IsA("Tool") and string.find(string.lower(item.Name), "bat") then
+            if not seen[item] and isCombatWeapon(item) then
+                seen[item] = true
                 table.insert(weapons, item)
             end
         end
     end
 
-    scan(char)
-    scan(backpack)
+    scan(LocalPlayer.Character)
+    scan(LocalPlayer:FindFirstChildOfClass("Backpack"))
 
-    if #weapons == 0 then
-        if char then
-            for _, item in ipairs(char:GetChildren()) do
-                if item:IsA("Tool") then table.insert(weapons, item) end
-            end
-        end
-        if backpack then
-            for _, item in ipairs(backpack:GetChildren()) do
-                if item:IsA("Tool") then table.insert(weapons, item) end
-            end
-        end
-    end
+    -- NEVER fallback to inserting random non-weapons!
     return weapons
+end
+
+HalloweenCombatManager = {
+    ToolIndex = 1,
+    LastSwapTime = 0,
+    HoverHeight = 3.0,
+    SwapDelay = 0.12
+}
+
+function HalloweenCombatManager:GetWeaponList()
+    return getAvailableCombatWeapons()
 end
 
 function HalloweenCombatManager:GetClosestMonster()
@@ -2030,28 +2087,53 @@ function HalloweenCombatManager:Process()
         local weapons = self:GetWeaponList()
 
         if #weapons >= 2 then
-            self.ToolIndex = (self.ToolIndex % #weapons) + 1
-            local targetTool = weapons[self.ToolIndex]
-            if targetTool then
-                hum:EquipTool(targetTool)
-                pcall(function() targetTool:Activate() end)
+            -- Cooldown-Aware Bat Switching (hot.lua standard):
+            -- Prioritize weapons whose CooldownEndTime has expired
+            local selectedTool = nil
+            local startIndex = self.ToolIndex
+            for i = 1, #weapons do
+                local candidateIndex = ((startIndex + i - 2) % #weapons) + 1
+                local cand = weapons[candidateIndex]
+                local cd = tonumber(cand:GetAttribute("CooldownEndTime")) or 0
+                if workspace:GetServerTimeNow() >= cd then
+                    selectedTool = cand
+                    self.ToolIndex = candidateIndex
+                    break
+                end
+            end
+
+            if not selectedTool then
+                self.ToolIndex = (self.ToolIndex % #weapons) + 1
+                selectedTool = weapons[self.ToolIndex]
+            end
+
+            if selectedTool then
+                if selectedTool.Parent ~= char then
+                    hum:EquipTool(selectedTool)
+                end
+                pcall(function() selectedTool:Activate() end)
             end
         elseif #weapons == 1 then
+            -- Single-Bat: Keep equipped continuously and activate (eliminates arm flapping unequip loop)
             local singleTool = weapons[1]
-            if self.IsHolding or singleTool.Parent == char then
-                hum:UnequipTools()
-                self.IsHolding = false
-            else
+            if singleTool.Parent ~= char then
                 hum:EquipTool(singleTool)
-                pcall(function() singleTool:Activate() end)
-                self.IsHolding = true
             end
+            pcall(function() singleTool:Activate() end)
         end
 
         local activeTool = char:FindFirstChildOfClass("Tool")
         local handle = activeTool and (activeTool:FindFirstChild("Handle") or activeTool:FindFirstChildWhichIsA("BasePart"))
         if handle and monsterPart then
             UniversalCompat.FireTouch(handle, monsterPart)
+        end
+
+        -- Trigger MonsterHit remote if available
+        local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
+        local networking = packages and packages:FindFirstChild("Networking")
+        local monsterHitRemote = networking and networking:FindFirstChild("RE/HalloweenDimension/MonsterHit")
+        if monsterHitRemote and monster then
+            pcall(function() monsterHitRemote:FireServer(monster) end)
         end
     end
 end
@@ -3354,25 +3436,7 @@ function HalloweenBossManager:IsPlayerInArena()
 end
 
 function HalloweenBossManager:GetInventoryBats()
-    local bats = {}
-    local seen = {}
-
-    local function scan(container)
-        if not container then return end
-        for _, item in ipairs(container:GetChildren()) do
-            if item:IsA("Tool") and not seen[item] then
-                local isBat = item:GetAttribute("IsBat") == true or item.Name:lower():find("bat")
-                if isBat then
-                    seen[item] = true
-                    table.insert(bats, item)
-                end
-            end
-        end
-    end
-
-    scan(LocalPlayer.Character)
-    scan(LocalPlayer:FindFirstChild("Backpack"))
-    return bats
+    return getAvailableCombatWeapons()
 end
 
 function HalloweenBossManager:PerformBatSwitchAttack(targetModel)
@@ -3383,18 +3447,40 @@ function HalloweenBossManager:PerformBatSwitchAttack(targetModel)
     if #bats == 0 then return end
 
     local state = getgenv().BossAutomationState
-    if state.CurrentBatIndex > #bats then
-        state.CurrentBatIndex = 1
+    if #bats >= 2 then
+        -- Cooldown-aware bat cycling (hot.lua standard)
+        local selectedBat = nil
+        local startIndex = state.CurrentBatIndex or 1
+        for i = 1, #bats do
+            local candidateIndex = ((startIndex + i - 2) % #bats) + 1
+            local cand = bats[candidateIndex]
+            local cd = tonumber(cand:GetAttribute("CooldownEndTime")) or 0
+            if workspace:GetServerTimeNow() >= cd then
+                selectedBat = cand
+                state.CurrentBatIndex = candidateIndex
+                break
+            end
+        end
+
+        if not selectedBat then
+            state.CurrentBatIndex = (state.CurrentBatIndex % #bats) + 1
+            selectedBat = bats[state.CurrentBatIndex]
+        end
+
+        if selectedBat and selectedBat.Parent ~= char then
+            pcall(function() hum:EquipTool(selectedBat) end)
+        end
+        if selectedBat then
+            pcall(function() selectedBat:Activate() end)
+        end
+    else
+        -- Single Bat: Keep equipped continuously
+        local singleBat = bats[1]
+        if singleBat.Parent ~= char then
+            pcall(function() hum:EquipTool(singleBat) end)
+        end
+        pcall(function() singleBat:Activate() end)
     end
-
-    local selectedBat = bats[state.CurrentBatIndex]
-    state.CurrentBatIndex = (state.CurrentBatIndex % #bats) + 1
-
-    if selectedBat.Parent ~= char then
-        pcall(function() hum:EquipTool(selectedBat) end)
-    end
-
-    pcall(function() selectedBat:Activate() end)
 
     if self.Remotes.MonsterHit and targetModel then
         pcall(function()
