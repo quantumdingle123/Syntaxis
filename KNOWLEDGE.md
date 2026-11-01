@@ -681,6 +681,25 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 
 ---
 
+### 6.16 Centralized Combat & Bat Switching Engine Architecture (hot.lua reference)
+- **Elimination of Non-Weapon Inventory Tool Leakage:**
+  - **The Defect Fixed:** Previously, in `HalloweenCombatManager:GetWeaponList()`, if `#weapons == 0` (e.g. user possessed Katanas, Scythes, Hammers, Blades, Axes, or custom swords rather than names containing the literal string `"bat"`), the script defaulted to an unconditional fallback: inserting EVERY tool in the backpack/character into the weapon array. This resulted in users equipping and swinging random items (fishing rods, vacuums, eggs, scramblers, mutators, potions, nets) in combat and candy farming.
+  - **Centralized Weapon Filter (`isCombatWeapon`):** Implemented multi-tier weapon identification adapted from `hot.lua` (`lines 12985–13035`):
+    1. **Strict Exclusion Check:** Explicitly rejects any tool matching non-weapon signatures (`rod`, `vacuum`, `ghostvacuum`, `egg`, `potion`, `scrambler`, `mutator`, `net`, `satchel`, `backpack`).
+    2. **Combat Weapon Keyword Whitelist:** Matches against comprehensive melee weapon keywords: `bat`, `katana`, `axe`, `staff`, `club`, `hammer`, `sword`, `blade`, `scythe`, `mace`, `spear`, `slapper`, `dagger`, `halberd`.
+    3. **Attribute Verification:** Validates tool attributes: `IsBat == true`, `IsWeapon == true`, or `WeaponType ~= nil`.
+    4. **Game Gear Definition Inspection:** Checks game gear registry for `BatControllerData` or `ToolController == "Slap"`.
+    5. **Zero Fallback Leakage:** Under NO circumstances does the engine fall back to dumping random backpack tools if no combat weapon is found.
+- **Elimination of Single-Weapon Arm Flapping:**
+  - **The Defect Fixed:** In single-bat scenarios (`#weapons == 1`), `HalloweenCombatManager:Process()` was previously toggling `hum:UnequipTools()` and `hum:EquipTool()` alternately every 0.08s, causing the character's arm to rapidly flail up and down without landing hits.
+  - **The Solution:** Added continuous equip validation for single-bat inventories. If `#weapons == 1`, the bat is equipped once and kept in-hand continuously without unequip-cycling.
+- **Cooldown-Aware Bat Switching (`hot.lua` pattern):**
+  - When `#weapons > 1`, weapons are cycled sequentially only when the currently equipped weapon enters cooldown (`tick() >= CooldownEndTime`), maximizing damage output across inventory bats without dropped hits.
+- **Unified Across All Combat Systems:**
+  - Standardized both `HalloweenCombatManager` (Auto Candy Cane Farm / NPC combat) and `HalloweenBossManager` (Auto Boss / Pumpkin King combat) to share identical weapon filtering and switching logic.
+
+---
+
 ## 9. Commit History & Version Milestones
 
 | Commit SHA | Commit Title / Name | Description |
@@ -722,5 +741,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `fc9bb55b3851f1af9db129c141fc93ace6a3e184` | `feat(dimension): bidirectional supervisor routing & exit portal transit for Normal tasks` | Wired autonomous ExitDimension routing for Normal tasks (Auto Treadmill, Auto Steal) when in Halloween Dimension. Modernized HalloweenPortalManager.ExitDimension with Auto Pumpkin movement architecture, eliminating PlatformStand corruption and adding inside-hitbox contact latching. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `8597e0daaf2f46cdbf8f668735a7b2ca9e9f5ea1` | `feat(restore): migrate & restore complete script to quantumdingle123/Syntaxis (BiteBySyntax) & GUILib` | Fully restored 100% of GUILib to quantumdingle123/GUILib (SyntaxisLib.lua & all src/ modules) and updated quantumdingle123/Syntaxis/BiteBySyntax with the latest master script. Verified 100% byte-for-byte identical via GitHub raw API. |
 | `b6f3fb85419b46cfb4bbae27ce027c2a059f9af3` | `feat(restore): create private repository quantumdingle123/hot with hot.lua and analysis.md` | Created private repository quantumdingle123/hot and restored complete hot.lua (1.8 MB) reference file alongside analysis.md. |
-
-
+| `1db44d97e1a82148e0d3259eadf8a19e1f512efd` | `fix(combat): eliminate inventory tool leakage & arm flapping in bat switching via hot.lua engine` | Centralized `isCombatWeapon` engine with strict non-weapon exclusions, multi-weapon keyword whitelist, attribute checks, eliminated `#weapons == 0` inventory dump, eliminated single-bat arm flapping, and integrated cooldown-aware switching across `HalloweenCombatManager` and `HalloweenBossManager`. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
