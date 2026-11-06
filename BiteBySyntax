@@ -127,8 +127,17 @@ local currentSettings = {
     ButterflySpeed = 320,
     TargetAreas = { ["All"] = true },
     MinRarity = "All",
+    AutoUFO = false,
+    UFORocks = false,
+    UFORare = true,
+    UFOTrade = false,
+    UFOTp = false,
+    BloomCatchMode = "Stand",
+    BloomCatchPriority = "Rarest",
+    BloomSmartTrade = true,
     TaskPriorities = {
         "Auto Steal",
+        "UFO Event",
         "Enchanted / Bloom Event",
         "Auto Treadmill"
     }
@@ -188,7 +197,15 @@ getgenv().config.autoWispQuest = currentSettings.AutoWispQuest
 getgenv().config.autoTradeUp = currentSettings.AutoTradeUp
 getgenv().config.autoCraftEssence = currentSettings.AutoCraftEssence
 getgenv().config.butterflySpeed = currentSettings.ButterflySpeed
-local PriorityManager, getBestEgg, DynamicRarityResolver, activeTheme, Window
+getgenv().config.autoUFO = currentSettings.AutoUFO == true
+getgenv().config.ufoRocks = currentSettings.UFORocks == true
+getgenv().config.ufoRare = currentSettings.UFORare ~= false
+getgenv().config.ufoTrade = currentSettings.UFOTrade == true
+getgenv().config.ufoTp = currentSettings.UFOTp == true
+getgenv().config.bloomCatchMode = currentSettings.BloomCatchMode or "Stand"
+getgenv().config.bloomCatchPriority = currentSettings.BloomCatchPriority or "Rarest"
+getgenv().config.bloomSmartTrade = currentSettings.BloomSmartTrade ~= false
+local UFOManager, PriorityManager, getBestEgg, DynamicRarityResolver, activeTheme, Window
 
 local State = {
     currentStealSession = 0,
@@ -376,9 +393,49 @@ local function fireRemote(pathName, ...)
     return false
 end
 
-local clientFolder = Services.ReplicatedStorage:WaitForChild("Client", 5)
-local eggStateModule = clientFolder and clientFolder:WaitForChild("EggState", 5)
-local EggState = eggStateModule and require(eggStateModule) or nil
+local _cachedEggState = nil
+local function getEggState()
+    if _cachedEggState then return _cachedEggState end
+    local client = Services.ReplicatedStorage:FindFirstChild("Client")
+    local mod = client and client:FindFirstChild("EggState")
+    if mod then
+        local ok, res = pcall(require, mod)
+        if ok and type(res) == "table" then
+            _cachedEggState = res
+            return res
+        end
+    end
+    return nil
+end
+
+local EggState = getEggState()
+
+local function getFieldEggRecords()
+    -- Path 1: Client EggState.ReadFieldEggs() with dynamic require retry
+    local es = getEggState() or EggState
+    if es and typeof(es.ReadFieldEggs) == "function" then
+        local ok, data = pcall(es.ReadFieldEggs)
+        if ok and type(data) == "table" and type(data.Records) == "table" and next(data.Records) ~= nil then
+            return data.Records
+        end
+    end
+
+    -- Path 2: Network Snapshot Fallback (RF/EggWorld/AskFieldEggSnapshot)
+    local snapshotRemote = getRemote("RF/EggWorld/AskFieldEggSnapshot")
+    if snapshotRemote and snapshotRemote:IsA("RemoteFunction") then
+        local ok, data = pcall(function() return snapshotRemote:InvokeServer() end)
+        if ok and type(data) == "table" then
+            if type(data.Records) == "table" and next(data.Records) ~= nil then
+                return data.Records
+            end
+            if next(data) ~= nil then
+                return data
+            end
+        end
+    end
+
+    return {}
+end
 
 pcall(function()
     local packages = Services.ReplicatedStorage:WaitForChild("Packages", 5)
@@ -1022,32 +1079,94 @@ local function getMinRequiredScore()
     return num or (MasterRegistry.RarityRanks[sel] or 1)
 end
 
+-- [ ENCHANTED / BLOOM EVENT MANAGER (hot.lua anti-cheat safe implementation) ]
 -- ==============================================================================
--- [ BLOOM & ENCHANTED EVENT CONTROLLER ]
--- ==============================================================================
-local BloomManager = { 
+local BloomManager = {
     IsBusy = false,
-    NetClaimed = false,
-    LastTradeCraft = 0
+    LastTradeCraft = 0,
+    TrackedButterflies = {},
+    NetReach = 14,
+    CenterPosition = Vector3.new(6700, 74, -364),
+    TradeTiers = { "Green", "Blue", "Purple" },
+    CostMap = { Green = 10, Blue = 10, Purple = 50 },
+    EssenceCost = { Green = 240, Blue = 115, Purple = 40, Golden = 1 }
 }
 
-local function getButterflyNetTool()
+-- Initialize event-driven butterfly tracking from remotes
+pcall(function()
+    local flagsMod = Services.ReplicatedStorage:FindFirstChild("Shared") and Services.ReplicatedStorage.Shared:FindFirstChild("Flags") and Services.ReplicatedStorage.Shared.Flags:FindFirstChild("ButterflyFlags")
+    if flagsMod then
+        local ok, flags = pcall(require, flagsMod)
+        if ok and flags and flags.NetReach and flags.NetReach.Get then
+            BloomManager.NetReach = tonumber(flags.NetReach:Get()) or 14
+        end
+        if ok and flags then
+            if flags.GreenToBlueCost and flags.GreenToBlueCost.Get then BloomManager.CostMap.Green = tonumber(flags.GreenToBlueCost:Get()) or 10 end
+            if flags.BlueToPurpleCost and flags.BlueToPurpleCost.Get then BloomManager.CostMap.Blue = tonumber(flags.BlueToPurpleCost:Get()) or 10 end
+            if flags.PurpleToGoldenCost and flags.PurpleToGoldenCost.Get then BloomManager.CostMap.Purple = tonumber(flags.PurpleToGoldenCost:Get()) or 50 end
+            if flags.EssenceGreen and flags.EssenceGreen.Get then BloomManager.EssenceCost.Green = tonumber(flags.EssenceGreen:Get()) or 240 end
+            if flags.EssenceBlue and flags.EssenceBlue.Get then BloomManager.EssenceCost.Blue = tonumber(flags.EssenceBlue:Get()) or 115 end
+            if flags.EssencePurple and flags.EssencePurple.Get then BloomManager.EssenceCost.Purple = tonumber(flags.EssencePurple:Get()) or 40 end
+            if flags.EssenceGolden and flags.EssenceGolden.Get then BloomManager.EssenceCost.Golden = tonumber(flags.EssenceGolden:Get()) or 1 end
+        end
+    end
+end)
+
+pcall(function()
+    local reSpawned = getRemote("RE/Butterflies/Spawned")
+    if reSpawned and reSpawned:IsA("RemoteEvent") then
+        reSpawned.OnClientEvent:Connect(function(arg1, arg2)
+            local bf = (type(arg1) == "table" and arg1) or (type(arg2) == "table" and arg2)
+            if bf and bf.Id then
+                BloomManager.TrackedButterflies[bf.Id] = bf
+            end
+        end)
+    end
+    local reRemoved = getRemote("RE/Butterflies/Removed")
+    if reRemoved and reRemoved:IsA("RemoteEvent") then
+        reRemoved.OnClientEvent:Connect(function(id)
+            if id then BloomManager.TrackedButterflies[id] = nil end
+        end)
+    end
+    local reEscaped = getRemote("RE/Butterflies/Escaped")
+    if reEscaped and reEscaped:IsA("RemoteEvent") then
+        reEscaped.OnClientEvent:Connect(function(id)
+            if id then BloomManager.TrackedButterflies[id] = nil end
+        end)
+    end
+end)
+
+function BloomManager:IsEventActive()
+    local endsAt = tonumber(workspace:GetAttribute("ButterflyBloomEndsAt"))
+    local isEvent = (workspace:GetAttribute("Event_ButterflyBloom") == true)
+    if isEvent then
+        if endsAt then return workspace:GetServerTimeNow() < endsAt end
+        return true
+    end
+    return false
+end
+
+function BloomManager:GetButterflyNet()
     local char = LocalPlayer.Character
+    if not char then return nil end
     local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-    for _, container in ipairs({char, backpack}) do
-        if container then
-            for _, item in ipairs(container:GetChildren()) do
-                if item:IsA("Tool") and (item:GetAttribute("ButterflyNet") == true or tostring(item:GetAttribute("ItemType")) == "ButterflyNet" or item.Name == "Butterfly Net") then
-                    return item
-                end
+    for _, item in ipairs(char:GetChildren()) do
+        if item:IsA("Tool") and (item:GetAttribute("ButterflyNet") == true or tostring(item:GetAttribute("ItemType")) == "ButterflyNet" or item.Name == "Butterfly Net") then
+            return item
+        end
+    end
+    if backpack then
+        for _, item in ipairs(backpack:GetChildren()) do
+            if item:IsA("Tool") and (item:GetAttribute("ButterflyNet") == true or tostring(item:GetAttribute("ItemType")) == "ButterflyNet" or item.Name == "Butterfly Net") then
+                return item
             end
         end
     end
     return nil
 end
 
-local function ensureButterflyNetEquipped()
-    local tool = getButterflyNetTool()
+function BloomManager:EnsureNetEquipped()
+    local tool = self:GetButterflyNet()
     local char = LocalPlayer.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if tool and char and hum then
@@ -1056,11 +1175,10 @@ local function ensureButterflyNetEquipped()
         end
         return tool
     end
-
     if Remotes.ClaimNet then
         pcall(function() Remotes.ClaimNet:InvokeServer() end)
         task.wait(0.2)
-        local claimed = getButterflyNetTool()
+        local claimed = self:GetButterflyNet()
         if claimed and char and hum and claimed.Parent ~= char then
             pcall(function() hum:EquipTool(claimed) end)
         end
@@ -1069,7 +1187,26 @@ local function ensureButterflyNetEquipped()
     return nil
 end
 
-function BloomManager:GetButterflies()
+function BloomManager:GetGroundPosition(targetPos)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    local filter = {}
+    local char = LocalPlayer.Character
+    if char then table.insert(filter, char) end
+    local swarm = Services.Workspace:FindFirstChild("ButterflyBloomSwarm")
+    if swarm then table.insert(filter, swarm) end
+    rayParams.FilterDescendantsInstances = filter
+
+    local hit = Services.Workspace:Raycast(targetPos + Vector3.new(0, 25, 0), Vector3.new(0, -120, 0), rayParams)
+    local _, _, hum = getAliveRig()
+    local hipHeight = (hum and hum.HipHeight) or 2
+    if hit then
+        return Vector3.new(targetPos.X, hit.Position.Y + hipHeight + 1, targetPos.Z)
+    end
+    return targetPos
+end
+
+function BloomManager:GetLiveButterflies()
     local list = {}
     local swarm = Services.Workspace:FindFirstChild("ButterflyBloomSwarm")
     if swarm then
@@ -1079,193 +1216,593 @@ function BloomManager:GetButterflies()
             end
         end
     end
-
     if #list == 0 then
-        for _, b in ipairs(Services.CollectionService:GetTagged("Butterfly")) do table.insert(list, b) end
-        for _, b in ipairs(Services.CollectionService:GetTagged("BloomButterfly")) do table.insert(list, b) end
-        local bFolder = Services.Workspace:FindFirstChild("Butterflies") or Services.Workspace:FindFirstChild("BloomButterflies")
-        if bFolder then
-            for _, b in ipairs(bFolder:GetChildren()) do
-                if b:IsA("Model") or b:IsA("BasePart") then table.insert(list, b) end
+        for id, data in pairs(self.TrackedButterflies) do
+            if data and data.Position then
+                table.insert(list, data)
             end
         end
     end
     return list
 end
 
-function BloomManager:ProcessButterflies(isStealActive, hasEgg)
-    if not getgenv().config.autoCatchButterfly or isStealActive or isHoldingEgg() or hasEgg then
-        self.IsBusy = false
-        return
+function BloomManager:HasWork()
+    if isMapClosed() then return false end
+    if getgenv().config.autoCatchButterfly and self:IsEventActive() then
+        return true
     end
-
-    local _, root, hum = getAliveRig()
-    if not root or not hum then return end
-
-    local butterflies = self:GetButterflies()
-    if #butterflies == 0 then
-        self.IsBusy = false
-        return
+    if getgenv().config.autoWispQuest and self:HasWispWork() then
+        return true
     end
+    if (getgenv().config.autoTradeUp or getgenv().config.autoCraftEssence) and self:HasMachineWork() then
+        return true
+    end
+    return false
+end
 
+function BloomManager:HasWispWork()
+    local save = getSaveData()
+    local wispComp = save and save.WispCompanion
+    if type(wispComp) == "table" and not wispComp.Unlocked then
+        return true
+    end
+    return false
+end
+
+function BloomManager:HasMachineWork()
+    local save = getSaveData()
+    local counts = (save and type(save.Butterflies) == "table" and save.Butterflies.Counts) or {}
+    if getgenv().config.autoCraftEssence then
+        local canCraft = true
+        for k, req in pairs(self.EssenceCost) do
+            if (counts[k] or 0) < req then canCraft = false break end
+        end
+        if canCraft then return true end
+    end
+    if getgenv().config.autoTradeUp then
+        for _, tier in ipairs(self.TradeTiers) do
+            if (counts[tier] or 0) >= (self.CostMap[tier] or 10) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function BloomManager:EnterEnchantedTree()
+    if LocalPlayer:GetAttribute("InEnchantedTree") == true then return true end
+    local world = Services.Workspace:FindFirstChild("World") or Services.Workspace
+    local enterTrigger = world:FindFirstChild("EnchantedTreeEntrance", true) or world:FindFirstChild("EnterTrigger", true)
+    local prompt = enterTrigger and enterTrigger:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if prompt and prompt.Parent then
+        local tPos = prompt.Parent:IsA("BasePart") and prompt.Parent.Position or prompt.Parent:GetPivot().Position
+        local _, root, hum = getAliveRig()
+        if root then
+            root.CFrame = CFrame.new(tPos + Vector3.new(0, 2, -4))
+            root.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.2)
+            UniversalCompat.FireProximityPrompt(prompt)
+            local timeout = os.clock() + 4.0
+            while os.clock() < timeout do
+                if LocalPlayer:GetAttribute("InEnchantedTree") == true then return true end
+                task.wait(0.1)
+            end
+        end
+    end
+    return LocalPlayer:GetAttribute("InEnchantedTree") == true
+end
+
+function BloomManager:LeaveEnchantedTree()
+    if LocalPlayer:GetAttribute("InEnchantedTree") ~= true then return true end
+    local interior = Services.Workspace:FindFirstChild("EnchantedTreeInterior", true)
+    local exitPart = interior and interior:FindFirstChild("ExitTrigger", true)
+    if exitPart and exitPart:IsA("BasePart") then
+        local _, root = getAliveRig()
+        if root then
+            root.CFrame = exitPart.CFrame
+            root.AssemblyLinearVelocity = Vector3.zero
+            UniversalCompat.FireTouch(root, exitPart)
+            local prompt = exitPart:FindFirstChildWhichIsA("ProximityPrompt")
+            if prompt then UniversalCompat.FireProximityPrompt(prompt) end
+            local timeout = os.clock() + 3.0
+            while os.clock() < timeout do
+                if LocalPlayer:GetAttribute("InEnchantedTree") ~= true then return true end
+                task.wait(0.1)
+            end
+        end
+    end
+    return true
+end
+
+function BloomManager:Process()
+    if State.isStealingActive or isHoldingEgg() then return end
     self.IsBusy = true
-    hopOffTreadmill()
-    ensureButterflyNetEquipped()
 
-    local speed = tonumber(getgenv().config.butterflySpeed) or 320
+    -- 1. Catch Butterflies
+    if getgenv().config.autoCatchButterfly and self:IsEventActive() then
+        self:EnsureNetEquipped()
+        local _, root, hum = getAliveRig()
+        if root and hum then
+            local mode = getgenv().config.bloomCatchMode or "Stand"
+            local butterflies = self:GetLiveButterflies()
 
-    for _, b in ipairs(butterflies) do
-        if not getgenv().config.autoCatchButterfly or isStealActive or isHoldingEgg() or hasEgg then
-            break
-        end
-
-        if b and b.Parent then
-            local bPos = nil
-            if b:IsA("BasePart") then
-                bPos = b.Position
-            elseif b:IsA("Model") then
-                local ok, pivot = pcall(b.GetPivot, b)
-                bPos = ok and pivot.Position or (b.PrimaryPart and b.PrimaryPart.Position)
-            end
-
-            if bPos then
-                local delta = bPos - root.Position
-                local timeout = os.clock() + (delta.Magnitude / speed) + 0.8
-
-                while (bPos - root.Position).Magnitude > 4.0 and os.clock() < timeout do
-                    if not getgenv().config.autoCatchButterfly or isStealActive or isHoldingEgg() then break end
-                    local _, curRoot = getAliveRig()
-                    if not curRoot or not b.Parent then break end
-
-                    local diff = bPos - curRoot.Position
-                    local dir = diff.Unit
-                    curRoot.AssemblyLinearVelocity = dir * speed
-                    curRoot.CFrame = CFrame.new(curRoot.Position + dir * math.min(speed * 0.03, diff.Magnitude))
-                    Services.RunService.Heartbeat:Wait()
+            if mode == "Stand" then
+                -- Safely stand at Bloom center, swing at butterflies in NetReach (14 studs)
+                local distToCenter = (root.Position - self.CenterPosition).Magnitude
+                if distToCenter > 12 then
+                    local groundCenter = self:GetGroundPosition(self.CenterPosition)
+                    root.CFrame = CFrame.new(groundCenter)
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    task.wait(0.2)
                 end
 
-                local _, curRoot = getAliveRig()
-                if curRoot and b.Parent then
-                    curRoot.CFrame = CFrame.new(bPos)
-                    curRoot.AssemblyLinearVelocity = Vector3.zero
-
-                    local part = b:IsA("BasePart") and b or b:FindFirstChildWhichIsA("BasePart")
-                    if part then
-                        UniversalCompat.FireTouch(curRoot, part)
+                for _, b in ipairs(butterflies) do
+                    local bPos = (typeof(b.Position) == "Vector3" and b.Position) or (b:IsA("BasePart") and b.Position) or (b:IsA("Model") and b:GetPivot().Position)
+                    if bPos and (bPos - root.Position).Magnitude <= (self.NetReach + 4) then
+                        local tool = self:EnsureNetEquipped()
+                        if tool then pcall(function() tool:Activate() end) end
+                        task.wait(0.1)
                     end
-
-                    local prompt = b:FindFirstChildWhichIsA("ProximityPrompt", true)
-                    if prompt and prompt.Enabled then
-                        UniversalCompat.FireProximityPrompt(prompt)
+                end
+            else
+                -- Chase mode: smooth ground navigation to nearest or rarest butterfly
+                local bestB = nil
+                local bestDist = math.huge
+                for _, b in ipairs(butterflies) do
+                    local bPos = (typeof(b.Position) == "Vector3" and b.Position) or (b:IsA("BasePart") and b.Position) or (b:IsA("Model") and b:GetPivot().Position)
+                    if bPos then
+                        local d = (bPos - root.Position).Magnitude
+                        if d < bestDist and d <= 250 then
+                            bestDist = d
+                            bestB = b
+                        end
                     end
-                    task.wait(0.06)
+                end
+
+                if bestB then
+                    local bPos = (typeof(bestB.Position) == "Vector3" and bestB.Position) or (bestB:IsA("BasePart") and bestB.Position) or (bestB:GetPivot().Position)
+                    local groundPos = self:GetGroundPosition(bPos)
+                    local speed = tonumber(getgenv().config.butterflySpeed) or 320
+                    local dir = (groundPos - root.Position)
+                    if dir.Magnitude > 6 then
+                        root.CFrame = CFrame.new(root.Position + dir.Unit * math.min(dir.Magnitude, speed * 0.05))
+                    end
+                    local tool = self:EnsureNetEquipped()
+                    if tool and (bPos - root.Position).Magnitude <= self.NetReach then
+                        pcall(function() tool:Activate() end)
+                    end
                 end
             end
         end
     end
 
-    local _, fRoot = getAliveRig()
-    if fRoot then fRoot.AssemblyLinearVelocity = Vector3.zero end
+    -- 2. Wisp Quests & Progression
+    if getgenv().config.autoWispQuest and self:HasWispWork() then
+        local save = getSaveData()
+        local wispComp = save and save.WispCompanion
+        local remote = getRemote("RF/WispCompanion/Request")
+        if remote and type(wispComp) == "table" then
+            local stage = tonumber(wispComp.Stage) or 1
+            if not wispComp.Accepted then
+                pcall(function() remote:InvokeServer("Accept") end)
+            elseif wispComp.Returning then
+                if self:EnterEnchantedTree() then
+                    pcall(function() remote:InvokeServer("Return") end)
+                    task.wait(0.5)
+                    self:LeaveEnchantedTree()
+                end
+            else
+                pcall(function() remote:InvokeServer("Claim", stage) end)
+            end
+        end
+    end
+
+    -- 3. In-Tree Machine Trade Up & Essence Crafting
+    if (getgenv().config.autoTradeUp or getgenv().config.autoCraftEssence) and self:HasMachineWork() then
+        if os.clock() - self.LastTradeCraft >= 2.0 then
+            self.LastTradeCraft = os.clock()
+            if self:EnterEnchantedTree() then
+                local tradeRemote = getRemote("RF/Butterflies/AskTradeUp")
+                local craftRemote = getRemote("RF/Butterflies/AskCraftEssence")
+
+                if getgenv().config.autoTradeUp and tradeRemote then
+                    local save = getSaveData()
+                    local counts = (save and type(save.Butterflies) == "table" and save.Butterflies.Counts) or {}
+                    for _, tier in ipairs(self.TradeTiers) do
+                        local req = self.CostMap[tier] or 10
+                        if (counts[tier] or 0) >= req then
+                            pcall(function() tradeRemote:InvokeServer("ButterflyMachine", tier) end)
+                            task.wait(0.2)
+                        end
+                    end
+                end
+
+                if getgenv().config.autoCraftEssence and craftRemote then
+                    pcall(function() craftRemote:InvokeServer("MutationShrine") end)
+                    task.wait(0.2)
+                end
+
+                self:LeaveEnchantedTree()
+            end
+        end
+    end
+
     self.IsBusy = false
 end
 
-function BloomManager:ProcessWisps(isStealActive, hasEgg)
-    if not getgenv().config.autoWispQuest or isStealActive or isHoldingEgg() or hasEgg then return end
+-- ==============================================================================
+-- [ UFO EVENT MANAGER (hot.lua reference implementation) ]
+-- ==============================================================================
+UFOManager = {
+    IsBusy = false,
+    State = {
+        st = {},
+        sus = {},
+        eggs = 0,
+        no = 0,
+        left = nil
+    },
+    Codes = { "4827", "0327" },
+    PipeValueMap = { Straight = 5, Elbow = 3, Cross = 15 },
+    PipeDirs = {
+        { 1, -1, 0, 4 },
+        { 2, 0, 1, 8 },
+        { 4, 1, 0, 1 },
+        { 8, 0, -1, 2 }
+    }
+}
 
+pcall(function()
+    local reState = getRemote("RE/UFOSightings/State")
+    if reState and reState:IsA("RemoteEvent") then
+        reState.OnClientEvent:Connect(function(st)
+            if type(st) == "table" then
+                UFOManager.State.st = st
+                UFOManager.State.sus = {}
+                for _, uid in ipairs(st.Suspicious or {}) do
+                    UFOManager.State.sus[uid] = true
+                end
+            end
+        end)
+    end
+end)
+
+function UFOManager:FetchState()
+    local fetchRemote = getRemote("RF/UFOSightings/Fetch")
+    if fetchRemote and fetchRemote:IsA("RemoteFunction") then
+        local ok, st = pcall(function() return fetchRemote:InvokeServer() end)
+        if ok and type(st) == "table" then
+            self.State.st = st
+            self.State.sus = {}
+            for _, uid in ipairs(st.Suspicious or {}) do
+                self.State.sus[uid] = true
+            end
+            return st
+        end
+    end
+    return nil
+end
+
+function UFOManager:RotateMask(mask, steps)
+    for i = 1, steps do
+        mask = bit32.band(bit32.bor(bit32.lshift(mask, 1), bit32.rshift(mask, 3)), 15)
+    end
+    return mask
+end
+
+function UFOManager:SolvePipePuzzle(seed)
+    local puzzleMod = Services.ReplicatedStorage:FindFirstChild("Shared") and Services.ReplicatedStorage.Shared:FindFirstChild("Modules") and Services.ReplicatedStorage.Shared.Modules:FindFirstChild("UFOSightingsPipePuzzle")
+    if not puzzleMod then return nil end
+    local ok, puzzleLib = pcall(require, puzzleMod)
+    if not ok or not puzzleLib or typeof(puzzleLib.Generate) ~= "function" then return nil end
+
+    local grid = puzzleLib.Generate(seed)
+    local visited = {}
+    local rotations = {}
+
+    for r = 1, 5 do
+        for c = 1, 5 do
+            rotations[((r - 1) * 5) + c] = grid[r][c].Rotation
+        end
+    end
+
+    local function dfs(r, c, enterBit)
+        local idx = ((r - 1) * 5) + c
+        visited[idx] = true
+
+        for rot = 0, 3 do
+            local basePiece = grid[r][c].Piece
+            local pieceMask = self.PipeValueMap[basePiece] or 5
+            local rotated = self:RotateMask(pieceMask, rot)
+
+            if bit32.band(rotated, enterBit) ~= 0 then
+                rotations[idx] = rot
+                if r == 4 and c == 5 and bit32.band(rotated, 2) ~= 0 then
+                    return true
+                end
+
+                for _, dirData in ipairs(self.PipeDirs) do
+                    local outBit, dr, dc, oppBit = dirData[1], dirData[2], dirData[3], dirData[4]
+                    if outBit ~= enterBit and bit32.band(rotated, outBit) ~= 0 then
+                        local nr, nc = r + dr, c + dc
+                        if nr >= 1 and nr <= 5 and nc >= 1 and nc <= 5 then
+                            local nIdx = ((nr - 1) * 5) + nc
+                            if not visited[nIdx] then
+                                if dfs(nr, nc, oppBit) then return true end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        visited[idx] = nil
+        return false
+    end
+
+    if dfs(2, 1, 8) then
+        return rotations
+    end
+    return nil
+end
+
+function UFOManager:IsInRareUFO()
+    local interior = self.State.st and self.State.st.Interior
+    if interior and (tonumber(interior.EndsAt) or 0) > 0 then return true end
+    local rareModel = Services.Workspace:FindFirstChild("RareUFOInterior")
+    return rareModel ~= nil
+end
+
+function UFOManager:HasWork()
+    if not getgenv().config.autoUFO then return nil end
+    local st = self.State.st or {}
+    if self:IsInRareUFO() then return "inside" end
+    if os.clock() < (self.State.no or 0) then return nil end
+
+    if not st.Unlocked then return "repair" end
+    if st.Reward then return "reward" end
+    if getgenv().config.ufoRocks and st.Rocks and st.Rocks.List and #st.Rocks.List > 0 then return "rocks" end
+    if getgenv().config.ufoTrade and (st.SpaceRocks or 0) >= (st.RockCost or math.huge) then return "trade" end
+    if getgenv().config.ufoRare and st.Event and st.Event.Variant == "Rare" and st.Decoded and st.Event.Id ~= self.State.left then
+        return "board"
+    end
+    if st.Event and st.Required and not st.Decoded and not st.Complete then return "decode" end
+    if st.Event and st.Decoded and not st.Complete and st.Event.Variant ~= "Rare" then return "hold" end
+    return nil
+end
+
+function UFOManager:IsUfoEgg(eggRecord, uid)
+    if not getgenv().config.autoUFO then return false end
+    local st = self.State.st
+    if not (st and st.Event and st.Decoded and not st.Complete and st.Event.Variant ~= "Rare") then
+        return false
+    end
+    if uid and self.State.sus[uid] then return true end
+    if next(self.State.sus) == nil and eggRecord then
+        local area = eggRecord.AreaId or (eggRecord.Record and eggRecord.Record.AreaId)
+        if tostring(area) == tostring(st.Biome) then return true end
+    end
+    return false
+end
+
+function UFOManager:Process()
+    local work = self:HasWork()
+    if not work then return end
     local _, root, hum = getAliveRig()
     if not root or not hum then return end
+    self.IsBusy = true
 
-    local remote = Remotes.WispRequest or getRemote("RF/WispCompanion/Request")
+    -- 1. REPAIR (NPC talk + 5x5 Pipe Puzzle)
+    if work == "repair" then
+        local camp = Services.Workspace:FindFirstChild("UFOSightingsCamp")
+        if camp then
+            if not self.State.st.MetChaser then
+                local chaser = camp:FindFirstChild("AlienChaser")
+                local cRoot = chaser and chaser:FindFirstChild("HumanoidRootPart")
+                if cRoot then
+                    root.CFrame = CFrame.new(cRoot.Position + Vector3.new(0, 2, -4))
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    task.wait(0.3)
+                    pcall(function() invokeRemote("RF/UFOSightings/Talk") end)
+                    self:FetchState()
+                end
+            end
 
-    local save = getSaveData()
-    local wispComp = save and save.WispCompanion
-
-    local accepted = type(wispComp) == "table" and wispComp.Accepted == true
-    local unlocked = type(wispComp) == "table" and wispComp.Unlocked == true
-
-    if remote and not accepted and not unlocked then
-        local world = Services.Workspace:FindFirstChild("World")
-        local spawnPart = world and world:FindFirstChild("Build") and world.Build:FindFirstChild("EnchantedForestZone") and world.Build.EnchantedForestZone:FindFirstChild("WispSpawn")
-        local targetPos = spawnPart and (spawnPart:IsA("BasePart") and spawnPart.Position or spawnPart:GetPivot().Position)
-        if targetPos then
-            self.IsBusy = true
-            hopOffTreadmill()
-            root.CFrame = CFrame.new(targetPos + Vector3.new(0, 2, 0))
-            root.AssemblyLinearVelocity = Vector3.zero
-            task.wait(0.2)
-            pcall(function() remote:InvokeServer("Accept") end)
-            task.wait(0.3)
-            self.IsBusy = false
-            return
-        end
-    elseif remote and accepted and not unlocked then
-        local stage = tonumber(wispComp and wispComp.Stage) or 1
-        pcall(function() remote:InvokeServer("Claim", stage) end)
-
-        if wispComp and wispComp.Returning then
-            pcall(function() remote:InvokeServer("BeginReturn") end)
-            local world = Services.Workspace:FindFirstChild("World")
-            local anchor = world and world:FindFirstChild("Build") and world.Build:FindFirstChild("EnchantedForestZone")
-            local treeAnchor = anchor and anchor:FindFirstChild("Zone13Props") and anchor.Zone13Props:FindFirstChild("EnchantedTree") and anchor.Zone13Props.EnchantedTree:FindFirstChild("WispAnchor")
-            local targetPos = treeAnchor and (treeAnchor:IsA("BasePart") and treeAnchor.Position or treeAnchor:GetPivot().Position)
-            if targetPos then
-                self.IsBusy = true
-                hopOffTreadmill()
-                root.CFrame = CFrame.new(targetPos + Vector3.new(0, 2, 0))
+            local repairPoint = camp:FindFirstChild("Root") and camp.Root:FindFirstChild("RepairPoint")
+            local rPos = repairPoint and (repairPoint:IsA("Attachment") and repairPoint.WorldPosition or repairPoint.Position)
+            if rPos then
+                root.CFrame = CFrame.new(rPos + Vector3.new(0, 2, 0))
                 root.AssemblyLinearVelocity = Vector3.zero
                 task.wait(0.2)
-                pcall(function() remote:InvokeServer("Return") end)
+                local ok, success, puzzleData = pcall(function()
+                    return invokeRemote("RF/UFOSightings/Repair", "Begin")
+                end)
+
+                if ok and success and type(puzzleData) == "table" and puzzleData.Seed then
+                    local solvedRotations = self:SolvePipePuzzle(puzzleData.Seed)
+                    if solvedRotations then
+                        task.wait(3.4)
+                        pcall(function()
+                            invokeRemote("RF/UFOSightings/Repair", "Finish", { Id = puzzleData.Id, Rotations = solvedRotations })
+                        end)
+                        self:FetchState()
+                    end
+                end
+            end
+        end
+
+    -- 2. DECODE (Equip signal decoder, locate UFO)
+    elseif work == "decode" then
+        local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+        local decoder = nil
+        for _, t in ipairs(root.Parent:GetChildren()) do
+            if t:IsA("Tool") and t:GetAttribute("UFOSignalDecoder") == true then decoder = t break end
+        end
+        if not decoder and backpack then
+            for _, t in ipairs(backpack:GetChildren()) do
+                if t:IsA("Tool") and t:GetAttribute("UFOSignalDecoder") == true then decoder = t break end
+            end
+        end
+        if decoder and hum then
+            pcall(function() hum:EquipTool(decoder) end)
+            local timeout = os.clock() + 45.0
+            local bestSignal = 0
+            local bestX = root.Position.X
+            local dir = 1
+
+            while os.clock() < timeout do
+                if not self.State.st.Event or self.State.st.Decoded then break end
+                local signal = tonumber(self.State.st.Signal) or 0
+                local curX = root.Position.X
+                if signal > bestSignal then
+                    bestSignal = signal
+                    bestX = curX
+                end
+
+                if curX > 6950 and dir > 0 then dir = -1
+                elseif curX < 650 and dir < 0 then dir = 1 end
+
+                local speed = (signal < 2 and 180) or 80
+                if bestSignal >= 4 then
+                    root.AssemblyLinearVelocity = Vector3.new(math.clamp((bestX - curX) * 5, -60, 60), 0, 0)
+                else
+                    root.AssemblyLinearVelocity = Vector3.new(dir * speed, 0, 0)
+                end
+                task.wait(0.1)
+            end
+            pcall(function() hum:UnequipTools() end)
+            self:FetchState()
+        end
+
+    -- 3. BOARD RARE UFO MOTHERSHIP
+    elseif work == "board" then
+        local ufoModel = self.State.st.Ufo
+        local uPos = ufoModel and (ufoModel:IsA("Model") and ufoModel:GetPivot().Position or ufoModel.Position)
+        if uPos then
+            root.CFrame = CFrame.new(uPos - Vector3.new(0, 85, 0))
+            root.AssemblyLinearVelocity = Vector3.zero
+            local timeout = os.clock() + 6.0
+            while os.clock() < timeout and not self:IsInRareUFO() do
+                task.wait(0.1)
+            end
+        end
+
+    -- 4. INSIDE RARE UFO (Smash capsules, crack keypad 4827/0327, claim staff, exit)
+    elseif work == "inside" then
+        local rareInterior = Services.Workspace:FindFirstChild("RareUFOInterior")
+        local capsules = rareInterior and rareInterior:FindFirstChild("Interactables") and rareInterior.Interactables:FindFirstChild("Capsules")
+
+        -- Smash capsules with equipped melee weapon
+        local weapon = nil
+        for _, t in ipairs(root.Parent:GetChildren()) do if t:IsA("Tool") and t.Name ~= "UFOSignalDecoder" and t.Name ~= "Butterfly Net" then weapon = t break end end
+        if not weapon then
+            local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
+            if bp then
+                for _, t in ipairs(bp:GetChildren()) do if t:IsA("Tool") and t.Name ~= "UFOSignalDecoder" and t.Name ~= "Butterfly Net" then weapon = t break end end
+            end
+        end
+        if weapon and hum and weapon.Parent ~= root.Parent then
+            pcall(function() hum:EquipTool(weapon) end)
+        end
+
+        if capsules then
+            for _, cap in ipairs(capsules:GetChildren()) do
+                if cap:IsA("Model") and not (self.State.st.Interior and self.State.st.Interior.Broken and table.find(self.State.st.Interior.Broken, cap.Name)) then
+                    local capPos = cap:GetPivot().Position
+                    root.CFrame = CFrame.new(capPos + Vector3.new(0, 1, 3))
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    if weapon then pcall(function() weapon:Activate() end) end
+                    task.wait(0.3)
+                end
+            end
+        end
+
+        -- Keypad & Vault Code
+        local vault = rareInterior and rareInterior:FindFirstChild("Interactables") and rareInterior.Interactables:FindFirstChild("Vault")
+        if vault and self.State.st.Interior and not self.State.st.Interior.VaultOpen then
+            local keypad = vault:FindFirstChild("Keypad", true)
+            if keypad then
+                root.CFrame = CFrame.new(keypad.Position + Vector3.new(0, 0, 3))
+                root.AssemblyLinearVelocity = Vector3.zero
                 task.wait(0.3)
-                self.IsBusy = false
-                return
+                for _, codeStr in ipairs(self.Codes) do
+                    local ok, success = pcall(function() return invokeRemote("RF/UFOSightings/VaultCode", codeStr) end)
+                    if ok and success then break end
+                    task.wait(0.3)
+                end
+                task.wait(1.5)
             end
         end
-    end
 
-    -- Fallback proximity prompt check if remote not found
-    local wispPrompt = nil
-    for _, obj in ipairs(Services.Workspace:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") and (string.find(string.lower(obj.Name), "wisp", 1, true) or string.find(string.lower(obj.ActionText), "wisp", 1, true)) then
-            wispPrompt = obj
-            break
+        -- Claim Alien Staff
+        local alienStaff = vault and vault:FindFirstChild("AlienStaff")
+        local staffRoot = alienStaff and alienStaff:FindFirstChild("Root")
+        if staffRoot and self.State.st.Interior and self.State.st.Interior.VaultOpen and not self.State.st.Interior.VaultClaimed then
+            root.CFrame = CFrame.new(staffRoot.Position + Vector3.new(0, 1, 0))
+            root.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.3)
+            pcall(function() invokeRemote("RF/UFOSightings/VaultClaim") end)
+            task.wait(0.5)
         end
-    end
 
-    if wispPrompt and wispPrompt.Parent and wispPrompt.Enabled then
-        self.IsBusy = true
-        hopOffTreadmill()
-        local wPos = wispPrompt.Parent:GetPivot().Position
-        root.CFrame = CFrame.new(wPos + Vector3.new(0, 2, 0))
-        root.AssemblyLinearVelocity = Vector3.zero
-        task.wait(0.1)
+        -- Exit Rare UFO
+        local leavePart = rareInterior and rareInterior:FindFirstChild("LeavePart")
+        if leavePart then
+            root.CFrame = CFrame.new(leavePart.Position)
+            root.AssemblyLinearVelocity = Vector3.zero
+            local prompt = leavePart:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt then UniversalCompat.FireProximityPrompt(prompt) end
+            task.wait(1.0)
+        end
+        self:FetchState()
 
-        UniversalCompat.FireProximityPrompt(wispPrompt)
-        task.wait(0.3)
-        self.IsBusy = false
-    end
-end
+    -- 5. ROCKS (Collect space rocks)
+    elseif work == "rocks" then
+        local rocks = self.State.st.Rocks
+        if rocks and rocks.List then
+            for _, rock in ipairs(rocks.List) do
+                if rock and rock.Position then
+                    root.CFrame = CFrame.new(rock.Position + Vector3.new(0, 2, 0))
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    pcall(function() fireRemote("RE/UFOSightings/CollectRock", rocks.Id, rock.Index) end)
+                    task.wait(0.1)
+                end
+            end
+            self:FetchState()
+        end
 
-function BloomManager:ProcessTradeAndCraft()
-    if os.clock() - self.LastTradeCraft < 2.0 then return end
-    self.LastTradeCraft = os.clock()
-
-    if getgenv().config.autoTradeUp then
-        local tradeRemote = Remotes.TradeUp or getRemote("RF/Butterflies/AskTradeUp")
-        if tradeRemote then
-            for _, tier in ipairs({"Green", "Blue", "Purple"}) do
-                pcall(function() tradeRemote:InvokeServer("ButterflyMachine", tier) end)
+    -- 6. TRADE (Trade rocks at camp)
+    elseif work == "trade" then
+        local camp = Services.Workspace:FindFirstChild("UFOSightingsCamp")
+        local chaser = camp and camp:FindFirstChild("AlienChaser")
+        local tradePoint = chaser and chaser:FindFirstChild("HumanoidRootPart") and chaser.HumanoidRootPart:FindFirstChild("TradePoint")
+        local tPos = tradePoint and (tradePoint:IsA("Attachment") and tradePoint.WorldPosition or tradePoint.Position)
+        if tPos then
+            root.CFrame = CFrame.new(tPos + Vector3.new(0, 2, 0))
+            root.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.2)
+            while (self.State.st.SpaceRocks or 0) >= (self.State.st.RockCost or math.huge) do
+                local ok, traded = pcall(function() return invokeRemote("RF/UFOSightings/Trade", self.State.st.RockCost) end)
+                if not ok or not traded then break end
+                self:FetchState()
+                task.wait(0.3)
             end
         end
-    end
 
-    if getgenv().config.autoCraftEssence then
-        local craftRemote = Remotes.CraftEssence or getRemote("RF/Butterflies/AskCraftEssence")
-        if craftRemote then
-            pcall(function() craftRemote:InvokeServer("MutationShrine") end)
+    -- 7. REWARD (Collect decoded/event reward)
+    elseif work == "reward" then
+        local reward = self.State.st.Reward
+        if reward and reward.Position and reward.Id then
+            root.CFrame = CFrame.new(reward.Position + Vector3.new(0, 2, 0))
+            root.AssemblyLinearVelocity = Vector3.zero
+            task.wait(0.2)
+            pcall(function() invokeRemote("RF/UFOSightings/Collect", reward.Id) end)
+            self:FetchState()
         end
     end
-end
 
+    self.IsBusy = false
+end
 
 -- [ TASK PRIORITY ARBITRATOR ]
 -- ==============================================================================
@@ -1274,12 +1811,16 @@ PriorityManager = {
     ActiveTaskExpiresAt = 0,
     List = {
         "Auto Steal",
+        "UFO Event",
         "Enchanted / Bloom Event",
         "Auto Treadmill"
     },
     TaskAliases = {
         ["Steal"] = "Auto Steal",
         ["Auto Steal"] = "Auto Steal",
+        ["UFO"] = "UFO Event",
+        ["Auto UFO"] = "UFO Event",
+        ["UFO Event"] = "UFO Event",
         ["Bloom"] = "Enchanted / Bloom Event",
         ["Bloom Event"] = "Enchanted / Bloom Event",
         ["Enchanted"] = "Enchanted / Bloom Event",
@@ -1292,6 +1833,7 @@ PriorityManager = {
 function PriorityManager:Initialize(savedPriorities)
     local canonicalList = {
         "Auto Steal",
+        "UFO Event",
         "Enchanted / Bloom Event",
         "Auto Treadmill"
     }
@@ -1382,6 +1924,8 @@ function PriorityManager:IsTaskEnabled(taskName)
     local resolved = self.TaskAliases[taskName] or taskName
     if resolved == "Auto Steal" then
         return isStealEnabled() and not isMapClosed()
+    elseif resolved == "UFO Event" then
+        return getgenv().config.autoUFO == true
     elseif resolved == "Enchanted / Bloom Event" then
         return (getgenv().config.autoCatchButterfly == true or getgenv().config.autoWispQuest == true or getgenv().config.autoTradeUp == true or getgenv().config.autoCraftEssence == true) and not isMapClosed()
     elseif resolved == "Auto Treadmill" then
@@ -1400,21 +1944,12 @@ function PriorityManager:HasWork(taskName)
         local best = getBestEgg and getBestEgg()
         return best ~= nil
 
+    elseif resolved == "UFO Event" then
+        return UFOManager ~= nil and UFOManager:HasWork() ~= nil
+
     elseif resolved == "Enchanted / Bloom Event" then
         if isMapClosed() then return false end
-        local wantButterfly = getgenv().config.autoCatchButterfly == true
-        local wantWisp = getgenv().config.autoWispQuest == true
-        local wantTrade = getgenv().config.autoTradeUp == true
-        local wantCraft = getgenv().config.autoCraftEssence == true
-        if not (wantButterfly or wantWisp or wantTrade or wantCraft) then return false end
-
-        if wantButterfly and BloomManager and BloomManager.GetButterflies and #BloomManager:GetButterflies() > 0 then
-            return true
-        end
-        if wantWisp or wantTrade or wantCraft then
-            return true
-        end
-        return false
+        return BloomManager ~= nil and BloomManager:HasWork()
 
     elseif resolved == "Auto Treadmill" then
         return getgenv().config.autoTreadmill == true
@@ -2422,10 +2957,10 @@ local function flyOutboundElevated(targetPosition, stopDistance, sessionId, targ
 end
 
 getBestEgg = function()
-    if not EggState or not EggState.ReadFieldEggs or isMapClosed() then return nil end
-    local data = nil
-    pcall(function() data = EggState.ReadFieldEggs() end)
-    if not data or not data.Records then return nil end
+    if isMapClosed() then return nil end
+    local records = getFieldEggRecords()
+    if not records or next(records) == nil then return nil end
+    local data = { Records = records }
 
     -- Steal Panel Target Handling (Normal Dimension only; never clear while actively stealing or holding an egg!)
     if isNormalStealPanelTarget() then
@@ -2516,14 +3051,22 @@ WorkerScheduler:Register("AutoUpgrades", 6.0, function()
     if getgenv().config.autoUpgradeBase then tryUpgradeBase() end
 end)
 
+WorkerScheduler:Register("UFOEvent", 0.25, function()
+    if State.isStealingActive or isHoldingEgg() then return end
+    if not PriorityManager:CanRun("UFO") then return end
+
+    if PriorityManager:Acquire("UFO", 25.0) then
+        pcall(function() UFOManager:Process() end)
+        PriorityManager:Release("UFO")
+    end
+end)
+
 WorkerScheduler:Register("EventsCombat", 0.35, function()
     if State.isStealingActive or isHoldingEgg() then return end
     if not PriorityManager:CanRun("Bloom") then return end
 
-    if PriorityManager:Acquire("Bloom", 10.0) then
-        BloomManager:ProcessButterflies(State.isStealingActive, false)
-        BloomManager:ProcessWisps(State.isStealingActive, false)
-        BloomManager:ProcessTradeAndCraft()
+    if PriorityManager:Acquire("Bloom", 15.0) then
+        pcall(function() BloomManager:Process() end)
         PriorityManager:Release("Bloom")
     end
 end)
@@ -2585,9 +3128,26 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                         local grabbed = instantGrabAtPosition(targetUid, eggTargetPos, session, false)
 
                         if (grabbed or isHoldingEgg()) and session == State.currentStealSession and isStealEnabled() then
-                            stealSuccess = executeFastStealDelivery(currentTargetEgg, session)
-                            if not stealSuccess and isHoldingEgg() and session == State.currentStealSession and isStealEnabled() then
-                                stealSuccess = executeCheckpointedHopsHome(currentTargetEgg, session)
+                            -- Check if UFO tractor beam delivery is active for this egg
+                            local isUfoTarget = UFOManager and UFOManager.IsUfoEgg and UFOManager:IsUfoEgg(currentTargetEgg, targetUid)
+                            if isUfoTarget and UFOManager.State.st.Ufo then
+                                local ufoPos = UFOManager.State.st.Ufo.Position
+                                local d0 = UFOManager.State.st.Delivered or 0
+                                local arrivedUFO = executeFastStealOutbound(ufoPos, session, targetUid)
+                                if arrivedUFO and session == State.currentStealSession then
+                                    local waitTimeout = os.clock() + 5.0
+                                    while os.clock() < waitTimeout and (UFOManager.State.st.Delivered or 0) <= d0 do
+                                        task.wait(0.1)
+                                    end
+                                    stealSuccess = (UFOManager.State.st.Delivered or 0) > d0
+                                end
+                            end
+
+                            if not stealSuccess and (grabbed or isHoldingEgg()) and session == State.currentStealSession and isStealEnabled() then
+                                stealSuccess = executeFastStealDelivery(currentTargetEgg, session)
+                                if not stealSuccess and isHoldingEgg() and session == State.currentStealSession and isStealEnabled() then
+                                    stealSuccess = executeCheckpointedHopsHome(currentTargetEgg, session)
+                                end
                             end
                         end
                     end
@@ -2778,48 +3338,98 @@ local treadmillCategory = FarmTab:CreateCategory("Automation Treadmill", false, 
 treadmillCategory:CreateToggle("Auto Treadmill", "Gain treadmill speed when idle", currentSettings.AutoTreadmill, function(state)
     getgenv().config.autoTreadmill = state
     currentSettings.AutoTreadmill = state
-    State.treadmillFailCount = 0
     saveStuff()
-    if not state then hopOffTreadmill() end
+end)
+
+-- UFO Event Category
+local ufoCategory = FarmTab:CreateCategory("UFO Event", false, 3)
+
+ufoCategory:CreateToggle("Auto UFO", "Automate decoding, tractor beam delivery & rewards", currentSettings.AutoUFO, function(state)
+    getgenv().config.autoUFO = state
+    currentSettings.AutoUFO = state
+    saveStuff()
+    if state and UFOManager and UFOManager.FetchState then
+        pcall(function() UFOManager:FetchState() end)
+    end
+end)
+
+ufoCategory:CreateToggle("Collect UFO Debris", "Collect space rocks across the world", currentSettings.UFORocks, function(state)
+    getgenv().config.ufoRocks = state
+    currentSettings.UFORocks = state
+    saveStuff()
+end)
+
+ufoCategory:CreateToggle("Farm Rare UFO", "Board mothership, smash capsules, vault & alien staff", currentSettings.UFORare, function(state)
+    getgenv().config.ufoRare = state
+    currentSettings.UFORare = state
+    saveStuff()
+end)
+
+ufoCategory:CreateToggle("Auto Trade Debris", "Trade space rocks at Alien Camp", currentSettings.UFOTrade, function(state)
+    getgenv().config.ufoTrade = state
+    currentSettings.UFOTrade = state
+    saveStuff()
+end)
+
+ufoCategory:CreateToggle("Teleport If Far From Egg", "Rapid travel to distant UFO eggs", currentSettings.UFOTp, function(state)
+    getgenv().config.ufoTp = state
+    currentSettings.UFOTp = state
+    saveStuff()
 end)
 
 -- Enchanted / Bloom Event Category
-local bloomCategory = FarmTab:CreateCategory("Enchanted / Bloom Event", false, 3)
+local bloomCategory = FarmTab:CreateCategory("Enchanted / Bloom Event", false, 4)
 
-bloomCategory:CreateToggle("Auto Bloom Event", "Auto catch butterflies during Bloom Event", currentSettings.AutoCatchButterfly, function(state)
+bloomCategory:CreateToggle("Auto Butterfly Bloom", "Safe ground-level butterfly catching", currentSettings.AutoCatchButterfly, function(state)
     getgenv().config.autoCatchButterfly = state
     currentSettings.AutoCatchButterfly = state
     saveStuff()
-    if not state then BloomManager.IsBusy = false end
 end)
 
-bloomCategory:CreateToggle("Auto Wisps Quest", "Auto advance & submit Wisp quest eggs", currentSettings.AutoWispQuest, function(state)
-    getgenv().config.autoWispQuest = state
-    currentSettings.AutoWispQuest = state
-    saveStuff()
-    if not state then BloomManager.IsBusy = false end
-end)
-
-bloomCategory:CreateToggle("Auto Trade Up", "Trade butterflies into higher tiers at machine", currentSettings.AutoTradeUp, function(state)
-    getgenv().config.autoTradeUp = state
-    currentSettings.AutoTradeUp = state
+bloomCategory:CreateDropdown("Catch Mode", "Stand in center or ground chase", {"Stand", "Chase"}, currentSettings.BloomCatchMode or "Stand", function(selected)
+    getgenv().config.bloomCatchMode = selected
+    currentSettings.BloomCatchMode = selected
     saveStuff()
 end)
 
-bloomCategory:CreateToggle("Auto Craft Essence", "Craft Enchanted Essence at Mutation Shrine", currentSettings.AutoCraftEssence, function(state)
-    getgenv().config.autoCraftEssence = state
-    currentSettings.AutoCraftEssence = state
+bloomCategory:CreateDropdown("Catch Priority", "Priority order for Chase mode", {"Rarest", "Nearest"}, currentSettings.BloomCatchPriority or "Rarest", function(selected)
+    getgenv().config.bloomCatchPriority = selected
+    currentSettings.BloomCatchPriority = selected
     saveStuff()
 end)
 
-bloomCategory:CreateSlider("Butterfly Speed", "Travel speed while catching butterflies", 100, 600, currentSettings.ButterflySpeed or 320, 10, function(val)
+bloomCategory:CreateSlider("Catch Speed", "Ground movement speed for Chase mode", 100, 600, currentSettings.ButterflySpeed, function(val)
     getgenv().config.butterflySpeed = val
     currentSettings.ButterflySpeed = val
     saveStuff()
 end)
 
+bloomCategory:CreateToggle("Auto Trade Up", "Trade butterflies at station inside tree", currentSettings.AutoTradeUp, function(state)
+    getgenv().config.autoTradeUp = state
+    currentSettings.AutoTradeUp = state
+    saveStuff()
+end)
+
+bloomCategory:CreateToggle("Smart Trade For Essence", "Only trade exact counts needed for essence", currentSettings.BloomSmartTrade ~= false, function(state)
+    getgenv().config.bloomSmartTrade = state
+    currentSettings.BloomSmartTrade = state
+    saveStuff()
+end)
+
+bloomCategory:CreateToggle("Auto Craft Essence", "Craft mutation essence at shrine inside tree", currentSettings.AutoCraftEssence, function(state)
+    getgenv().config.autoCraftEssence = state
+    currentSettings.AutoCraftEssence = state
+    saveStuff()
+end)
+
+bloomCategory:CreateToggle("Auto Wisp Quest", "Accept, progress & claim wisp companion quests", currentSettings.AutoWispQuest, function(state)
+    getgenv().config.autoWispQuest = state
+    currentSettings.AutoWispQuest = state
+    saveStuff()
+end)
+
 -- Automation Upgrades Category
-local upgradesCategory = FarmTab:CreateCategory("Automation Upgrades", false, 4)
+local upgradesCategory = FarmTab:CreateCategory("Automation Upgrades", false, 5)
 
 upgradesCategory:CreateToggle("Auto Upgrade Treadmill", "Auto buy next tier treadmill", currentSettings.AutoUpgradeTreadmill, function(state)
     getgenv().config.autoUpgradeTreadmill = state
@@ -2858,8 +3468,10 @@ local PriorityTab = Window:CreatePriorityTab("Priority", "Task Priority", {
 -- [ TAB 3: STEAL SCANNER PANEL ]
 -- ==============================================================================
 local function getStealPanelEggItems()
-    local data = EggState and typeof(EggState.ReadFieldEggs) == "function" and EggState.ReadFieldEggs()
-    local records = (data and data.Records) or {}
+    local records = getFieldEggRecords()
+    if not records or next(records) == nil then
+        return {}
+    end
 
     if State.targetedSpecificUid and not isHoldingEgg() and not State.isStealingActive then
         local found = false
@@ -2874,37 +3486,74 @@ local function getStealPanelEggItems()
         end
     end
 
+    -- Lazy load game Assets and Mutations modules
+    local assetsDir = nil
+    pcall(function()
+        local aMod = Services.ReplicatedStorage:FindFirstChild("Data") and Services.ReplicatedStorage.Data:FindFirstChild("Assets")
+        if aMod then
+            local ok, a = pcall(require, aMod)
+            if ok and a and type(a.Directory) == "table" then
+                assetsDir = a.Directory
+            end
+        end
+    end)
+
+    local mutationsMod = nil
+    pcall(function()
+        local mMod = Services.ReplicatedStorage:FindFirstChild("Shared") and Services.ReplicatedStorage.Shared:FindFirstChild("Modules") and Services.ReplicatedStorage.Shared.Modules:FindFirstChild("Mutations")
+        if mMod then
+            local ok, m = pcall(require, mMod)
+            if ok and type(m) == "table" then mutationsMod = m end
+        end
+    end)
+
     local eggItems = {}
 
-    -- Normal Dimension Eggs
     for keyUid, record in pairs(records) do
         local uid = record.Uid or keyUid
         record.Uid = uid
-        if not isBlacklisted(uid) and (record.State == "Slot" or record.State == "Dropped" or record.State == nil) then
-            local rawName = record.AssetCategory or record.Category or record.Name or "Unknown"
-            local rarityName, rarityRank = MasterRegistry:Lookup(rawName)
-            local pData = MasterRegistry.PetDatabase[rawName] or {}
 
-            local scale = tonumber(record.AssetScale) or 1
-            local factor = scale > 5 and ((scale / 5) ^ 1.2 * 19.637875755794113) or (scale ^ 1.85)
-            local mutationBonus = (record.Mutations and #record.Mutations > 0) and 2.5 or 1
-            local earningRate = tonumber(pData.EarningRate) or 0
-            local valuePerSec = earningRate * factor * mutationBonus
+        if type(record) == "table" and type(uid) == "string" and string.sub(uid, 1, 12) ~= "FirstAreaEgg" and not isBlacklisted(uid) then
+            if record.State == "Slot" or record.State == "Dropped" or record.State == "Placed" or record.State == nil then
+                local cat = tostring(record.AssetCategory or record.Category or record.Name or "Unknown")
+                local assetData = (assetsDir and assetsDir[cat]) or MasterRegistry.PetDatabase[cat] or {}
 
-            local iconId = tostring(pData.Icon or "")
-            if iconId ~= "" and tonumber(iconId) then iconId = "rbxassetid://" .. iconId end
+                local displayName = tostring(assetData.DisplayName or cat)
+                local rarityData = (type(assetData.Rarity) == "table" and assetData.Rarity) or {}
+                local rarityName = tostring(rarityData.DisplayName or rarityData._id or assetData.Rarity or "Common")
+                local rarityRank = tonumber(rarityData.RarityNumber or rarityData.Rank or assetData.Rank) or 1
 
-            table.insert(eggItems, {
-                Uid = uid,
-                Name = rawName,
-                Area = tostring(record.AreaId or "Unknown"),
-                Scale = scale,
-                Rarity = rarityName,
-                Rank = rarityRank,
-                Value = valuePerSec,
-                Icon = iconId,
-                Record = record
-            })
+                local scale = tonumber(record.AssetScale) or 1
+                local scaleFactor = (scale > 5) and (((scale / 5) ^ 1.2) * 19.637875755794113) or (scale ^ 1.85)
+
+                local mutationMultiplier = 1
+                if mutationsMod and typeof(mutationsMod.EarningsFor) == "function" and type(record.Mutations) == "table" then
+                    local ok, mul = pcall(mutationsMod.EarningsFor, record.Mutations)
+                    if ok and type(mul) == "number" and mul > 0 then
+                        mutationMultiplier = mul
+                    end
+                elseif record.Mutations and #record.Mutations > 0 then
+                    mutationMultiplier = 2.5
+                end
+
+                local baseRate = tonumber(assetData.EarningRate) or 0
+                local valuePerSec = baseRate * scaleFactor * mutationMultiplier
+
+                local iconId = tostring(assetData.Icon or assetData.Thumbnail or "")
+                if iconId ~= "" and tonumber(iconId) then iconId = "rbxassetid://" .. iconId end
+
+                table.insert(eggItems, {
+                    Uid = uid,
+                    Name = displayName,
+                    Area = tostring(record.AreaId or "Unknown"),
+                    Scale = scale,
+                    Rarity = rarityName,
+                    Rank = rarityRank,
+                    Value = valuePerSec,
+                    Icon = iconId,
+                    Record = record
+                })
+            end
         end
     end
 
