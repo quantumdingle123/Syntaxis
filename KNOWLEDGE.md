@@ -43,6 +43,19 @@
     ```lua
     local SyntaxisLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/quantumdingle123/GUILib/main/SyntaxisLib.lua"))()
     ```
+  - **Full Supported Component Catalog & Specifications:**
+    - `Category:CreateToggle(title, desc, default, callback)`: High-contrast switch (`NoTrans` protected, right-anchored `Vector2.new(1, 0.5)`).
+    - `Category:CreateKeybind(title, desc, defaultKey, callback, order)`: Tactile iOS keybind badge with listening mode (`[ ... ]`), micro-scale compression (`0.92x`), energetic spring snap release (`1.08x` -> `1.0x` via `Animations.iOSSpring`), `Escape`/`Backspace`/`Delete` unbinding to `None`, and live gameplay physical keypress reflection.
+    - `Category:CreateSlider(title, desc, min, max, default, step, callback)`: Smooth drag/touch slider with step snapping.
+    - `Category:CreateDropdown(title, desc, items, default, callback)`: Floating `PopupOverlayLayer` (`ZIndex = 50`) single-select menu with auto-flip and auto-close.
+    - `Category:CreateMultiDropdown(title, desc, items, defaultMap, callback)`: Floating multi-select menu with `"All"` mutual exclusivity.
+    - `Category:CreateButton(title, desc, btnText, callback)`: Pill-shaped action button with tactile spring feedback.
+    - `Category:CreateTextbox(title, desc, placeholder, default, callback)`: Styled input field with focus glow.
+    - `Category:CreateLabel(text)`: Informational status card with `:SetText()`.
+    - `Category:CreateSeparator()` : Subtle horizontal divider line.
+    - `Window:CreatePriorityTab(name, title, opts)`: Reorderable task priority list with dynamic swap animations.
+    - `Window:CreateStealPanelTab(name, title, opts)`: Live field egg scanner with sorting & direct steal actions.
+    - `Window:CreateSettingsTab(name, title, opts)`: Built-in theme palette selector & transparency slider.
 - **Reference Repository (Private):** [`tenobarillas-ship-it/cool`](https://github.com/tenobarillas-ship-it/cool)
   - Houses the monolithic 49,217-line reference script `hot.lua`.
   - Used strictly for reverse engineering, remote discovery, and algorithm comparison.
@@ -852,3 +865,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `d9d2fa385f1486799798c7eaccacf7cc43351d8c` | `feat(ufo-bloom-steal): implement UFO event suite, dual-path steal panel & anti-cheat safe bloom` | Full UFO Event suite (state machine, bitmask pipe puzzle solver, signal decoder, rare mothership interior & vault, tractor beam egg delivery & debris trading); Steal Panel dual-path snapshot pipeline & asset directory metadata lookup; anti-cheat safe Bloom/Enchanted overhaul (event-driven remote tracking, ground raycasting, Stand/Chase modes, prompt tree transit & smart trade math). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `54bd8f577ca632cd0165f89b0e5a95c7284b7c20` | `fix(wisp): stabilize auto wisp quest with hot.lua event gating, outdoor anchor & smooth stepping` | Precondition gating (50B speed power & forest reveal), eliminated blind Claim remote spam, outdoor WispAnchor return, smooth waypoint stepping (StepTowards), fusery automation & 100% normal steal preservation. |
 | `b9c304d6344cb339d842f95c1fda24662a4ef26d` | `fix(steal-ufo): restore steal panel via GameModules loader & fix UFO event physics & availability gating` | Fixed Steal Panel blank display via GameModules dot-path traversal loader, elevated thread identity 8, multi-path resolution (Client EggState -> RF snapshot -> persistent cache), Carried state support & asset directory lookup; fixed Auto UFO tweaking/teleporting/floating via strict st.Available event gating, Y-gravity preservation in decode mode, runway Z-alignment (-365), 60s failure backoff & smooth rock approach. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `a1b9f7c24018e69ba35822ffede0bc4578a9c84e` | `feat(guilib): implement tactile iOS Keybind component with live gameplay reflection and unbind support` | Added tactile Keybind component to GUILib with micro-scale press compression (0.92x), listening mode ([ ... ]), energetic iOS spring confirm bounce (1.08x -> 1.0x), Escape/Backspace/Delete unbinding, and real-time physical keypress reflection on screen during active gameplay. |
