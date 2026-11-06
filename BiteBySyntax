@@ -403,7 +403,9 @@ local modulePaths = {
     EggRecords = { "Shared", "Util", "EggRecords" },
     AreaEggCycle = { "Shared", "Util", "AreaEggCycle" },
     PlotState = { "Client", "PlotState" },
-    UFOSightingsPipePuzzle = { "Shared", "Modules", "UFOSightingsPipePuzzle" }
+    UFOSightingsPipePuzzle = { "Shared", "Modules", "UFOSightingsPipePuzzle" },
+    Wisp = { "Data", "WispQuests" },
+    Areas = { "Data", "Areas" }
 }
 
 function GameModules:Get(name)
@@ -1123,6 +1125,8 @@ end
 local BloomManager = {
     IsBusy = false,
     LastTradeCraft = 0,
+    LastWispAction = 0,
+    LastWispFailure = 0,
     TrackedButterflies = {},
     NetReach = 14,
     CenterPosition = Vector3.new(6700, 74, -364),
@@ -1279,13 +1283,295 @@ function BloomManager:HasWork()
     return false
 end
 
+local function getWispTargetPosition(kind)
+    local world = Services.Workspace:FindFirstChild("World") or Services.Workspace:FindFirstChild("__OBJECTS") or Services.Workspace
+    local build = world:FindFirstChild("Build") or Services.Workspace:FindFirstChild("Build")
+
+    if kind == "WispSpawn" then
+        local p = build and build:FindFirstChild("EnchantedForestZone") and build.EnchantedForestZone:FindFirstChild("WispSpawn")
+        if not p then p = Services.Workspace:FindFirstChild("WispSpawn", true) end
+        if p then
+            return (p:IsA("BasePart") and p.Position) or (p:IsA("Model") and p:GetPivot().Position) or (p:IsA("Attachment") and p.WorldPosition)
+        end
+    elseif kind == "WispAnchor" then
+        local p = build and build:FindFirstChild("EnchantedForestZone")
+        local anchor = p and p:FindFirstChild("Zone13Props") and p.Zone13Props:FindFirstChild("EnchantedTree") and p.Zone13Props.EnchantedTree:FindFirstChild("WispAnchor")
+        if not anchor and p then anchor = p:FindFirstChild("WispAnchor") end
+        if not anchor then anchor = Services.Workspace:FindFirstChild("WispAnchor", true) end
+        if anchor then
+            return (anchor:IsA("BasePart") and anchor.Position) or (anchor:IsA("Model") and anchor:GetPivot().Position) or (anchor:IsA("Attachment") and anchor.WorldPosition)
+        end
+    end
+    return nil
+end
+
+function BloomManager:StepTowards(targetPos, maxDuration)
+    local _, root, hum = getAliveRig()
+    if not root or not hum then return false end
+
+    pcall(function() LocalPlayer:RequestStreamAroundAsync(targetPos) end)
+    local deadline = os.clock() + (maxDuration or 10.0)
+
+    while os.clock() < deadline do
+        local _, curRoot, curHum = getAliveRig()
+        if not curRoot or not curHum then return false end
+
+        local horizDiff = Vector3.new(targetPos.X - curRoot.Position.X, 0, targetPos.Z - curRoot.Position.Z)
+        local dist = horizDiff.Magnitude
+        if dist <= 6 then
+            return true
+        end
+
+        if dist > 35 then
+            -- Smooth horizontal waypoint stepping (matching hot.lua stepTo)
+            local speed = tonumber(getgenv().config.butterflySpeed) or 320
+            local stepSize = math.clamp(speed * 0.1, 15, 45)
+            local stepTarget = curRoot.Position + horizDiff.Unit * math.min(dist, stepSize)
+
+            -- Raycast to align with ground altitude
+            local ground = self:GetGroundPosition(stepTarget)
+            curRoot.CFrame = CFrame.new(Vector3.new(stepTarget.X, ground.Y, stepTarget.Z))
+            -- Preserve gravity / zero horizontal velocity
+            curRoot.AssemblyLinearVelocity = Vector3.new(0, math.clamp(curRoot.AssemblyLinearVelocity.Y, -50, 50), 0)
+            task.wait(0.08)
+        else
+            -- Close proximity: walk with Humanoid:MoveTo for natural arrival
+            curHum:MoveTo(targetPos)
+            task.wait(0.15)
+        end
+    end
+
+    local _, endRoot = getAliveRig()
+    return endRoot and (targetPos - endRoot.Position).Magnitude <= 10
+end
+
+function BloomManager:HandleFusery(quest)
+    local save = getSaveData()
+    if not save then return end
+
+    local finishRevealRemote = getRemote("RF/Fusery/FinishReveal")
+    if save.FusionLocked then
+        if type(save.FusionEggReward) == "table" and finishRevealRemote then
+            pcall(function() finishRevealRemote:InvokeServer() end)
+        end
+        return
+    end
+
+    local areaId = type(quest.Match) == "table" and quest.Match.AreaId
+    local areaConfigs = Services.ReplicatedStorage:FindFirstChild("Data") and Services.ReplicatedStorage.Data:FindFirstChild("Areas") and Services.ReplicatedStorage.Data.Areas:FindFirstChild("Configs")
+    local dropCategories = {}
+    if areaConfigs and areaId then
+        local cfgMod = areaConfigs:FindFirstChild(tostring(areaId))
+        if cfgMod and cfgMod:IsA("ModuleScript") then
+            local ok, cfg = pcall(require, cfgMod)
+            if ok and cfg and type(cfg.DropTable) == "table" then
+                for _, row in ipairs(cfg.DropTable) do
+                    local cat = row[1] or row.Category
+                    if cat then dropCategories[tostring(cat)] = true end
+                end
+            end
+        end
+    end
+
+    local readyPets = {}
+    if type(save.Inventory) == "table" then
+        for petUid, petData in pairs(save.Inventory) do
+            if type(petData) == "table" and not petData.IsFavorite and not petData.InFuse then
+                local cat = tostring(petData.AssetCategory)
+                if dropCategories[cat] or not areaId then
+                    table.insert(readyPets, petUid)
+                    if #readyPets >= 3 then break end
+                end
+            end
+        end
+    end
+
+    if #readyPets >= 3 then
+        local ejectRemote = getRemote("RF/Fusery/EjectPet")
+        local briefingRemote = getRemote("RF/Fusery/ConfirmBriefing")
+        local loadRemote = getRemote("RF/Fusery/LoadPet")
+        local fuseRemote = getRemote("RF/Fusery/BeginFuse")
+
+        local fusionSlots = (type(save.FusionSlots) == "table" and save.FusionSlots) or {}
+        local readyMap = { [readyPets[1]] = true, [readyPets[2]] = true, [readyPets[3]] = true }
+        local loadedMap = {}
+
+        for _, slotPet in ipairs(fusionSlots) do
+            if readyMap[slotPet] then
+                loadedMap[slotPet] = true
+            elseif ejectRemote then
+                pcall(function() ejectRemote:InvokeServer(slotPet) end)
+                task.wait(0.2)
+            end
+        end
+
+        if save.FusionInfoAcknowledged == false and briefingRemote then
+            pcall(function() briefingRemote:InvokeServer() end)
+            task.wait(0.2)
+        end
+
+        for _, pUid in ipairs(readyPets) do
+            if not loadedMap[pUid] and loadRemote then
+                pcall(function() loadRemote:InvokeServer(pUid) end)
+                task.wait(0.2)
+            end
+        end
+
+        if fuseRemote then
+            pcall(function() fuseRemote:InvokeServer() end)
+            task.wait(0.3)
+        end
+    end
+end
+
 function BloomManager:HasWispWork()
+    if isMapClosed() then return false end
+    if os.clock() - self.LastWispAction < 2.0 then return false end
+    if os.clock() - self.LastWispFailure < 15.0 then return false end
+
     local save = getSaveData()
     local wispComp = save and save.WispCompanion
-    if type(wispComp) == "table" and not wispComp.Unlocked then
+    if type(wispComp) ~= "table" then return false end
+    if wispComp.Unlocked == true then return false end
+
+    local wispData = GameModules:Get("Wisp")
+    local reqSpeed = (wispData and tonumber(wispData.RequiredSpeedPower)) or 50000000000
+    local stageCount = (wispData and tonumber(wispData.StageCount)) or 4
+
+    if not wispComp.Accepted then
+        if (tonumber(save.SpeedPower) or 0) < reqSpeed then return false end
+        local build = Services.Workspace:FindFirstChild("Build")
+        if not (build and build:GetAttribute("EnchantedForestZoneRevealed") == true) then return false end
         return true
     end
+
+    local stage = tonumber(wispComp.Stage) or 1
+    if stage >= stageCount then
+        return true
+    end
+
+    local quest = wispData and wispData.List and wispData.List[stage]
+    if quest then
+        local isClaimed = type(wispComp.Claimed) == "table" and wispComp.Claimed[quest.Id]
+        local progress = type(wispComp.Progress) == "table" and tonumber(wispComp.Progress[quest.Id]) or 0
+        local target = tonumber(quest.Target) or 1
+        if not isClaimed and progress >= target then
+            return true
+        end
+
+        if quest.Event == "PetFused" then
+            if save.FusionLocked then return true end
+            local count = 0
+            if type(save.Inventory) == "table" then
+                for _, pet in pairs(save.Inventory) do
+                    if type(pet) == "table" and not pet.IsFavorite and not pet.InFuse then
+                        count = count + 1
+                    end
+                end
+            end
+            if count >= 3 then return true end
+        end
+    end
+
     return false
+end
+
+function BloomManager:ProcessWisp()
+    local save = getSaveData()
+    local wispComp = save and save.WispCompanion
+    if type(wispComp) ~= "table" or wispComp.Unlocked == true then return end
+
+    local remote = getRemote("RF/WispCompanion/Request")
+    if not remote then return end
+
+    local wispData = GameModules:Get("Wisp")
+    local reqSpeed = (wispData and tonumber(wispData.RequiredSpeedPower)) or 50000000000
+    local stageCount = (wispData and tonumber(wispData.StageCount)) or 4
+
+    -- 1. Unaccepted Quest -> Meet Wisp at WispSpawn
+    if not wispComp.Accepted then
+        if (tonumber(save.SpeedPower) or 0) < reqSpeed then
+            self.LastWispFailure = os.clock()
+            return
+        end
+        local build = Services.Workspace:FindFirstChild("Build")
+        if not (build and build:GetAttribute("EnchantedForestZoneRevealed") == true) then
+            self.LastWispFailure = os.clock()
+            return
+        end
+
+        local spawnPos = getWispTargetPosition("WispSpawn")
+        if not spawnPos then
+            self.LastWispFailure = os.clock()
+            return
+        end
+
+        if self:StepTowards(spawnPos, 12.0) then
+            task.wait(0.5)
+            local ok = pcall(function() remote:InvokeServer("Accept") end)
+            if ok then
+                self.LastWispAction = os.clock()
+            else
+                self.LastWispFailure = os.clock()
+            end
+        else
+            self.LastWispFailure = os.clock()
+        end
+        return
+    end
+
+    local stage = tonumber(wispComp.Stage) or 1
+    local quest = wispData and wispData.List and wispData.List[stage]
+
+    -- 2. Stage Objective Completed -> Claim Reward
+    if quest then
+        local isClaimed = type(wispComp.Claimed) == "table" and wispComp.Claimed[quest.Id]
+        local progress = type(wispComp.Progress) == "table" and tonumber(wispComp.Progress[quest.Id]) or 0
+        local target = tonumber(quest.Target) or 1
+
+        if not isClaimed and progress >= target then
+            local ok = pcall(function() remote:InvokeServer("Claim", quest.Id) end)
+            if ok then
+                self.LastWispAction = os.clock()
+            else
+                self.LastWispFailure = os.clock()
+            end
+            return
+        end
+    end
+
+    -- 3. All Stages Complete -> Return Wisp to Outdoor WispAnchor
+    if stage >= stageCount then
+        if not wispComp.Returning then
+            pcall(function() remote:InvokeServer("BeginReturn") end)
+            task.wait(0.3)
+        end
+
+        local anchorPos = getWispTargetPosition("WispAnchor")
+        if not anchorPos then
+            self.LastWispFailure = os.clock()
+            return
+        end
+
+        if self:StepTowards(anchorPos, 12.0) then
+            task.wait(0.5)
+            local ok = pcall(function() remote:InvokeServer("Return") end)
+            if ok then
+                self.LastWispAction = os.clock()
+            else
+                self.LastWispFailure = os.clock()
+            end
+        else
+            self.LastWispFailure = os.clock()
+        end
+        return
+    end
+
+    -- 4. In-Progress Pet Fusing
+    if quest and quest.Event == "PetFused" then
+        self:HandleFusery(quest)
+        self.LastWispAction = os.clock()
+    end
 end
 
 function BloomManager:HasMachineWork()
@@ -1415,25 +1701,9 @@ function BloomManager:Process()
         end
     end
 
-    -- 2. Wisp Quests & Progression
+    -- 2. Wisp Quests & Progression (hot.lua event-gated architecture)
     if getgenv().config.autoWispQuest and self:HasWispWork() then
-        local save = getSaveData()
-        local wispComp = save and save.WispCompanion
-        local remote = getRemote("RF/WispCompanion/Request")
-        if remote and type(wispComp) == "table" then
-            local stage = tonumber(wispComp.Stage) or 1
-            if not wispComp.Accepted then
-                pcall(function() remote:InvokeServer("Accept") end)
-            elseif wispComp.Returning then
-                if self:EnterEnchantedTree() then
-                    pcall(function() remote:InvokeServer("Return") end)
-                    task.wait(0.5)
-                    self:LeaveEnchantedTree()
-                end
-            else
-                pcall(function() remote:InvokeServer("Claim", stage) end)
-            end
-        end
+        self:ProcessWisp()
     end
 
     -- 3. In-Tree Machine Trade Up & Essence Crafting
