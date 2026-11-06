@@ -43,19 +43,6 @@
     ```lua
     local SyntaxisLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/quantumdingle123/GUILib/main/SyntaxisLib.lua"))()
     ```
-  - **Full Supported Component Catalog & Specifications:**
-    - `Category:CreateToggle(title, desc, default, callback)`: High-contrast switch (`NoTrans` protected, right-anchored `Vector2.new(1, 0.5)`).
-    - `Category:CreateKeybind(title, desc, defaultKey, callback, order)`: Tactile iOS keybind badge with listening mode (`[ ... ]`), micro-scale compression (`0.92x`), energetic spring snap release (`1.08x` -> `1.0x` via `Animations.iOSSpring`), `Escape`/`Backspace`/`Delete` unbinding to `None`, and live gameplay physical keypress reflection.
-    - `Category:CreateSlider(title, desc, min, max, default, step, callback)`: Smooth drag/touch slider with step snapping.
-    - `Category:CreateDropdown(title, desc, items, default, callback)`: Floating `PopupOverlayLayer` (`ZIndex = 50`) single-select menu with auto-flip and auto-close.
-    - `Category:CreateMultiDropdown(title, desc, items, defaultMap, callback)`: Floating multi-select menu with `"All"` mutual exclusivity.
-    - `Category:CreateButton(title, desc, btnText, callback)`: Pill-shaped action button with tactile spring feedback.
-    - `Category:CreateTextbox(title, desc, placeholder, default, callback)`: Styled input field with focus glow.
-    - `Category:CreateLabel(text)`: Informational status card with `:SetText()`.
-    - `Category:CreateSeparator()` : Subtle horizontal divider line.
-    - `Window:CreatePriorityTab(name, title, opts)`: Reorderable task priority list with dynamic swap animations.
-    - `Window:CreateStealPanelTab(name, title, opts)`: Live field egg scanner with sorting & direct steal actions.
-    - `Window:CreateSettingsTab(name, title, opts)`: Built-in theme palette selector & transparency slider.
 - **Reference Repository (Private):** [`tenobarillas-ship-it/cool`](https://github.com/tenobarillas-ship-it/cool)
   - Houses the monolithic 49,217-line reference script `hot.lua`.
   - Used strictly for reverse engineering, remote discovery, and algorithm comparison.
@@ -794,6 +781,26 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 
 ---
 
+### 6.21 Steal Panel Display Persistence & Resilient Data Pipeline Architecture (hot.lua reference)
+- **1. Root Cause Resolution for Vanishing Steal Panel Display:**
+  - **Eliminated Wrapper Return & Cache Corruption:** In `getFieldEggRecords()`, client calls to `EggState.ReadFieldEggs()` or server invocations of `RF/EggWorld/AskFieldEggSnapshot` return a wrapper response table (e.g., `{ Success = true, Carrying = false, CarryUid = nil, Records = {} }`). Previously, if `data.Records` was empty, the code fell through to `elseif next(data) ~= nil` and returned `data` itself while overwriting `State.cachedFieldEggs = data`. This corrupted the egg cache with wrapper booleans and metadata.
+  - **Type-Safe Table Iteration:** In `getStealPanelEggItems()`, the loop previously attempted `local uid = record.Uid or keyUid` before checking `type(record) == "table"`. When iterating over corrupted wrapper booleans (`false.Uid`), Luau threw an unhandled runtime error (`attempt to index a boolean value`), immediately aborting the item parser and leaving the panel blank. Enforced strict `if type(record) == "table" then` validation before accessing `record.Uid`, `record.State`, or `record.AssetCategory`.
+  - **Strict Record Extraction Matching `hot.lua` (line 7331):**
+    ```lua
+    local function getRecords(argument5, argument6)
+        return ((argument5 and (type(argument6) == "table")) and (type(argument6.Records) == "table"))
+            and argument6.Records
+    end
+    ```
+    Only extracts and caches `data.Records` if and only if `type(data.Records) == "table" and next(data.Records) ~= nil`. Never accepts, returns, or caches the raw wrapper object.
+  - **Persistent Render Item Fallback Cache (`State.cachedStealPanelItems`):** Added an item-level persistence cache. When `#eggItems > 0`, the parsed card items are saved into `State.cachedStealPanelItems`. If a live network fetch temporarily yields nil or returns 0 records, `getStealPanelEggItems()` seamlessly returns `State.cachedStealPanelItems` rather than `{}`. This ensures `renderStealPanel` never wipes existing cards when data is momentarily in transit.
+
+- **2. Scope & Normal Dimension Auto Steal Preservation:**
+  - All Normal Dimension Auto Steal routines (`executeStealRoutine`, `flyOutboundSmooth`, `flyOutboundElevated`, `hopOffTreadmill`, boundary checkpoint $X = 600.2$, 45-stud micro-hops) remain **100% byte-for-byte preserved**.
+  - GUILib repository left completely unmodified per user instructions.
+
+---
+
 ### 6.19 Steal Panel Resilient Data Pipeline & Auto UFO Physics Stabilization (hot.lua reference)
 - **1. Steal Panel Restoration (`hot.lua` lines 80–135 & 7336–7372):**
   - **Executor Thread Identity 8 Elevation:** In Roblox client executors, requiring `ReplicatedStorage.Client.EggState` or calling `EggState.ReadFieldEggs()` requires thread identity 8. Integrated `setthreadidentity(8)` / `set_thread_identity(8)` elevation directly into module require and method invocation matching `hot.lua` (`line 7346`).
@@ -863,6 +870,6 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `1db44d97e1a82148e0d3259eadf8a19e1f512efd` | `fix(combat): eliminate inventory tool leakage & arm flapping in bat switching via hot.lua engine` | Centralized `isCombatWeapon` engine with strict non-weapon exclusions, multi-weapon keyword whitelist, attribute checks, eliminated `#weapons == 0` inventory dump, eliminated single-bat arm flapping, and integrated cooldown-aware switching across `HalloweenCombatManager` and `HalloweenBossManager`. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `fe9aa6c3f6ed1ce0cdfbc500b28ee35b632f55a2` | `feat(cleanup): complete removal of Halloween Event 2026 modules, managers, workers & GUI categories` | Cleaned 4,710 lines of Halloween code: purged 9 seasonal managers, 7 background workers, dimension supervisors, and GUI controls. Streamlined `PriorityManager` to 3 core tasks. Reduced script footprint by >60% (297 KB -> 113 KB). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `d9d2fa385f1486799798c7eaccacf7cc43351d8c` | `feat(ufo-bloom-steal): implement UFO event suite, dual-path steal panel & anti-cheat safe bloom` | Full UFO Event suite (state machine, bitmask pipe puzzle solver, signal decoder, rare mothership interior & vault, tractor beam egg delivery & debris trading); Steal Panel dual-path snapshot pipeline & asset directory metadata lookup; anti-cheat safe Bloom/Enchanted overhaul (event-driven remote tracking, ground raycasting, Stand/Chase modes, prompt tree transit & smart trade math). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `8a6d9fad62c38251bc8e6305b1bd5aa42e08240d` | `fix(steal-panel): resolve vanishing display via type-safe records validation & persistent item cache` | Eliminated wrapper return corruption in `getFieldEggRecords`, protected `record.Uid` indexing with `type(record) == "table"`, added `State.cachedStealPanelItems` persistence cache matching `hot.lua`, and preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `54bd8f577ca632cd0165f89b0e5a95c7284b7c20` | `fix(wisp): stabilize auto wisp quest with hot.lua event gating, outdoor anchor & smooth stepping` | Precondition gating (50B speed power & forest reveal), eliminated blind Claim remote spam, outdoor WispAnchor return, smooth waypoint stepping (StepTowards), fusery automation & 100% normal steal preservation. |
 | `b9c304d6344cb339d842f95c1fda24662a4ef26d` | `fix(steal-ufo): restore steal panel via GameModules loader & fix UFO event physics & availability gating` | Fixed Steal Panel blank display via GameModules dot-path traversal loader, elevated thread identity 8, multi-path resolution (Client EggState -> RF snapshot -> persistent cache), Carried state support & asset directory lookup; fixed Auto UFO tweaking/teleporting/floating via strict st.Available event gating, Y-gravity preservation in decode mode, runway Z-alignment (-365), 60s failure backoff & smooth rock approach. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
-| `a1b9f7c24018e69ba35822ffede0bc4578a9c84e` | `feat(guilib): implement tactile iOS Keybind component with live gameplay reflection and unbind support` | Added tactile Keybind component to GUILib with micro-scale press compression (0.92x), listening mode ([ ... ]), energetic iOS spring confirm bounce (1.08x -> 1.0x), Escape/Backspace/Delete unbinding, and real-time physical keypress reflection on screen during active gameplay. |
