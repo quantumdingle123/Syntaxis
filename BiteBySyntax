@@ -421,9 +421,12 @@ function GameModules:Get(name)
     end
 
     if current and current:IsA("ModuleScript") then
+        local getid = getthreadidentity or get_thread_identity
         local setid = setthreadidentity or set_thread_identity
+        local oldId = getid and getid()
         if setid then pcall(setid, 8) end
         local ok, mod = pcall(require, current)
+        if setid and oldId then pcall(setid, oldId) end
         if ok and type(mod) == "table" then
             _moduleCache[name] = mod
             return mod
@@ -442,9 +445,12 @@ local function getFieldEggRecords()
     -- Path 1: Client EggState.ReadFieldEggs() with elevated identity 8
     local es = GameModules:Get("EggState") or EggState or getEggState()
     if es and typeof(es.ReadFieldEggs) == "function" then
+        local getid = getthreadidentity or get_thread_identity
         local setid = setthreadidentity or set_thread_identity
+        local oldId = getid and getid()
         if setid then pcall(setid, 8) end
         local ok, data = pcall(es.ReadFieldEggs)
+        if setid and oldId then pcall(setid, oldId) end
         if ok and type(data) == "table" and type(data.Records) == "table" and next(data.Records) ~= nil then
             State.cachedFieldEggs = data.Records
             return data.Records
@@ -3312,10 +3318,12 @@ getBestEgg = function()
     -- Steal Panel Target Handling (Normal Dimension only; never clear while actively stealing or holding an egg!)
     if isNormalStealPanelTarget() then
         for uid, record in pairs(data.Records) do
-            if uid == State.targetedSpecificUid or record.Uid == State.targetedSpecificUid then
-                record.Uid = record.Uid or uid
-                if State.isStealingActive or isHoldingEgg() or (record.State ~= "Claimed" and record.State ~= "Carried") then
-                    return record
+            if type(record) == "table" then
+                if uid == State.targetedSpecificUid or record.Uid == State.targetedSpecificUid then
+                    record.Uid = record.Uid or uid
+                    if State.isStealingActive or isHoldingEgg() or (record.State ~= "Claimed" and record.State ~= "Carried") then
+                        return record
+                    end
                 end
             end
         end
@@ -3335,27 +3343,28 @@ getBestEgg = function()
                 State.activeStealButtons[State.targetedSpecificUid].Text = "Steal"
             end
             State.targetedSpecificUid = nil
-                    end
+        end
     end
 
     local minScore = getMinRequiredScore()
     local bestEgg = nil
     local highestScore = -math.huge
-        local normalStealEnabled = getgenv().config.autoFarm == true
+    local normalStealEnabled = getgenv().config.autoFarm == true
 
     for keyUid, record in pairs(data.Records) do
-        local uid = record.Uid or keyUid
-        record.Uid = uid
-        if uid and not isBlacklisted(uid) then
-            if record.State == "Slot" or record.State == "Dropped" or record.State == nil then
-                local posX = nil
-                local cf = record.BottomCFrame or record.BoundsCFrame or record.CFrame
-                if typeof(cf) == "CFrame" then posX = cf.Position.X
-                elseif typeof(cf) == "Vector3" then posX = cf.X
-                elseif typeof(record.Position) == "Vector3" then posX = record.Position.X end
+        if type(record) == "table" then
+            local uid = (type(record.Uid) == "string" and record.Uid) or (type(keyUid) == "string" and keyUid) or nil
+            record.Uid = uid
+            if uid and not isBlacklisted(uid) then
+                if record.State == "Slot" or record.State == "Dropped" or record.State == nil then
+                    local posX = nil
+                    local cf = record.BottomCFrame or record.BoundsCFrame or record.CFrame
+                    if typeof(cf) == "CFrame" then posX = cf.Position.X
+                    elseif typeof(cf) == "Vector3" then posX = cf.X
+                    elseif typeof(record.Position) == "Vector3" then posX = record.Position.X end
 
-                if not posX or posX >= 560 then
-                    local rawName = record.AssetCategory or record.Category or record.Name or "Unknown"
+                    if not posX or posX >= 560 then
+                        local rawName = record.AssetCategory or record.Category or record.Name or "Unknown"
                     
                     if isLabNeeded then
                         local scale = tonumber(record.AssetScale) or 1
@@ -3385,6 +3394,7 @@ getBestEgg = function()
                 end
             end
         end
+    end
     end
     return bestEgg
 end
