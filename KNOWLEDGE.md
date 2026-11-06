@@ -752,6 +752,35 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 
 ---
 
+### 6.20 Auto Wisp Quest Stabilization & Event-Gated Architecture (hot.lua reference)
+- **1. Precondition Gating & Quest Lifecycle (`hot.lua` lines 446–830 & 16740–17240):**
+  - **Completed Quest Inactivity:** If `wispComp.Unlocked == true`, the questline is 100% complete and the Enchanted Tree is permanently open. `BloomManager:HasWispWork()` immediately returns `false` (taking 0 actions).
+  - **Meeting Preconditions:** For unaccepted quests (`not wispComp.Accepted`), requires:
+    1. `(tonumber(save.SpeedPower) or 0) >= (wispData.RequiredSpeedPower or 50,000,000,000)` (50B Speed Power).
+    2. `workspace.Build:GetAttribute("EnchantedForestZoneRevealed") == true`.
+    If either precondition is unmet, `HasWispWork()` returns `false` without spamming remotes or moving the character.
+  - **Eliminated Blind Remote Spam:** Replaced the blind 0.35s `Claim, stage` remote loop with exact completion validation: only invokes `remote:InvokeServer("Claim", quest.Id)` when `not isClaimed and progress >= target`, passing the stage's ID string (`quest.Id`) instead of numeric index.
+  - **Outdoor Wisp Anchor Resolution:** Fixed the return sequence: rather than executing illegal raw CFrame teleports into `EnchantedTreeInterior` (which is exclusively for the butterfly crafting machine), the wisp is returned outdoors at `Build.EnchantedForestZone.Zone13Props.EnchantedTree.WispAnchor` or `WispAnchor` via `RF/WispCompanion/Request, "Return"`.
+
+- **2. Anti-Cheat Compliant Waypoint Stepper (`StepTowards`):**
+  - **Smooth Horizontal Navigation:** Replaced raw CFrame snapping with horizontal waypoint stepping in 15–40 stud increments (`math.clamp(speed * 0.1, 15, 45)`).
+  - **Ground Raycast Clamping:** Evaluates terrain height via `self:GetGroundPosition()` on each step, preventing characters from floating into the sky or clipping below ground.
+  - **Gravity Preservation:** Preserves `AssemblyLinearVelocity.Y` (clamped between -50 and 50) while zeroing horizontal linear velocity, eliminating physics anomalies and anti-cheat rubberbanding.
+  - **Proximity Hand-off:** Within 35 studs, transitions to standard `Humanoid:MoveTo()` until within 6 studs of the destination, followed by a 0.5s settle buffer before firing the interaction remote.
+
+- **3. Fusery Automation for `PetFused` Quests:**
+  - Automatically handles pet fusing for quest stages requiring fused pets:
+    - If `FusionLocked`, finishes reveal via `RF/Fusery/FinishReveal`.
+    - Discovers 3 eligible pets matching the target `AreaId` drop categories.
+    - Clears unneeded pets via `RF/Fusery/EjectPet`.
+    - Confirms briefing if `FusionInfoAcknowledged == false`.
+    - Loads 3 matching pets via `RF/Fusery/LoadPet` and begins fusion via `RF/Fusery/BeginFuse`.
+
+- **4. Normal Dimension Steal Preservation:**
+  - 100% byte-for-byte preserved (`verify_normal_steal.js` passed).
+
+---
+
 ### 6.19 Steal Panel Resilient Data Pipeline & Auto UFO Physics Stabilization (hot.lua reference)
 - **1. Steal Panel Restoration (`hot.lua` lines 80–135 & 7336–7372):**
   - **Executor Thread Identity 8 Elevation:** In Roblox client executors, requiring `ReplicatedStorage.Client.EggState` or calling `EggState.ReadFieldEggs()` requires thread identity 8. Integrated `setthreadidentity(8)` / `set_thread_identity(8)` elevation directly into module require and method invocation matching `hot.lua` (`line 7346`).
@@ -821,4 +850,5 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `1db44d97e1a82148e0d3259eadf8a19e1f512efd` | `fix(combat): eliminate inventory tool leakage & arm flapping in bat switching via hot.lua engine` | Centralized `isCombatWeapon` engine with strict non-weapon exclusions, multi-weapon keyword whitelist, attribute checks, eliminated `#weapons == 0` inventory dump, eliminated single-bat arm flapping, and integrated cooldown-aware switching across `HalloweenCombatManager` and `HalloweenBossManager`. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `fe9aa6c3f6ed1ce0cdfbc500b28ee35b632f55a2` | `feat(cleanup): complete removal of Halloween Event 2026 modules, managers, workers & GUI categories` | Cleaned 4,710 lines of Halloween code: purged 9 seasonal managers, 7 background workers, dimension supervisors, and GUI controls. Streamlined `PriorityManager` to 3 core tasks. Reduced script footprint by >60% (297 KB -> 113 KB). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `d9d2fa385f1486799798c7eaccacf7cc43351d8c` | `feat(ufo-bloom-steal): implement UFO event suite, dual-path steal panel & anti-cheat safe bloom` | Full UFO Event suite (state machine, bitmask pipe puzzle solver, signal decoder, rare mothership interior & vault, tractor beam egg delivery & debris trading); Steal Panel dual-path snapshot pipeline & asset directory metadata lookup; anti-cheat safe Bloom/Enchanted overhaul (event-driven remote tracking, ground raycasting, Stand/Chase modes, prompt tree transit & smart trade math). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `54bd8f577ca632cd0165f89b0e5a95c7284b7c20` | `fix(wisp): stabilize auto wisp quest with hot.lua event gating, outdoor anchor & smooth stepping` | Precondition gating (50B speed power & forest reveal), eliminated blind Claim remote spam, outdoor WispAnchor return, smooth waypoint stepping (StepTowards), fusery automation & 100% normal steal preservation. |
 | `b9c304d6344cb339d842f95c1fda24662a4ef26d` | `fix(steal-ufo): restore steal panel via GameModules loader & fix UFO event physics & availability gating` | Fixed Steal Panel blank display via GameModules dot-path traversal loader, elevated thread identity 8, multi-path resolution (Client EggState -> RF snapshot -> persistent cache), Carried state support & asset directory lookup; fixed Auto UFO tweaking/teleporting/floating via strict st.Available event gating, Y-gravity preservation in decode mode, runway Z-alignment (-365), 60s failure backoff & smooth rock approach. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
