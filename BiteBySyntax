@@ -1791,6 +1791,26 @@ function UFOManager:FetchState()
     return nil
 end
 
+function UFOManager:GetUfoPosition()
+    local ufo = self.State.st and self.State.st.Ufo
+    if not ufo then return nil end
+    if typeof(ufo) == "Instance" then
+        if ufo:IsA("Model") then
+            return ufo:GetPivot().Position
+        elseif ufo:IsA("BasePart") then
+            return ufo.Position
+        end
+    elseif typeof(ufo) == "Vector3" then
+        return ufo
+    end
+    return nil
+end
+
+task.spawn(function()
+    task.wait(1.0)
+    pcall(function() UFOManager:FetchState() end)
+end)
+
 function UFOManager:RotateMask(mask, steps)
     for i = 1, steps do
         mask = bit32.band(bit32.bor(bit32.lshift(mask, 1), bit32.rshift(mask, 3)), 15)
@@ -1862,7 +1882,8 @@ function UFOManager:IsInRareUFO()
 end
 
 function UFOManager:HasWork()
-    if not getgenv().config.autoUFO then return nil end
+    local anyUfo = getgenv().config.autoUFO or getgenv().config.ufoRocks or getgenv().config.ufoTrade or getgenv().config.ufoRare
+    if not anyUfo then return nil end
     local st = self.State.st or {}
 
     -- Strict hot.lua event gate (lines 20295-20330): if UFO event is not available or locked, do NOTHING
@@ -1874,15 +1895,19 @@ function UFOManager:HasWork()
     if os.clock() < (self.State.no or 0) then return nil end
     if isMapClosed() then return nil end
 
-    if not st.Unlocked then return "repair" end
-    if st.Reward then return "reward" end
+    if getgenv().config.autoUFO then
+        if not st.Unlocked then return "repair" end
+        if st.Reward then return "reward" end
+    end
     if getgenv().config.ufoRocks and st.Rocks and st.Rocks.List and #st.Rocks.List > 0 then return "rocks" end
     if getgenv().config.ufoTrade and (st.SpaceRocks or 0) >= (st.RockCost or math.huge) then return "trade" end
     if getgenv().config.ufoRare and st.Event and st.Event.Variant == "Rare" and st.Decoded and st.Event.Id ~= self.State.left then
         return "board"
     end
-    if st.Event and st.Required and not st.Decoded and not st.Complete then return "decode" end
-    if st.Event and st.Decoded and not st.Complete and st.Event.Variant ~= "Rare" then return "hold" end
+    if getgenv().config.autoUFO then
+        if st.Event and st.Required and not st.Decoded and not st.Complete then return "decode" end
+        if st.Event and st.Decoded and not st.Complete and st.Event.Variant ~= "Rare" then return "hold" end
+    end
     return nil
 end
 
@@ -1907,7 +1932,7 @@ function UFOManager:Process()
     if not root or not hum then return end
     self.IsBusy = true
 
-    -- 1. REPAIR (NPC talk + 5x5 Pipe Puzzle)
+    -- 1. REPAIR (NPC talk + 5x5 Pipe Puzzle with direct return unpacking)
     if work == "repair" then
         local camp = Services.Workspace:FindFirstChild("UFOSightingsCamp")
         local repairSuccess = false
@@ -1919,7 +1944,7 @@ function UFOManager:Process()
                     root.CFrame = CFrame.new(cRoot.Position + Vector3.new(0, 2, -4))
                     root.AssemblyLinearVelocity = Vector3.zero
                     task.wait(0.3)
-                    pcall(function() invokeRemote("RF/UFOSightings/Talk") end)
+                    invokeRemote("RF/UFOSightings/Talk")
                     self:FetchState()
                 end
             end
@@ -1930,17 +1955,13 @@ function UFOManager:Process()
                 root.CFrame = CFrame.new(rPos + Vector3.new(0, 2, 0))
                 root.AssemblyLinearVelocity = Vector3.zero
                 task.wait(0.2)
-                local ok, success, puzzleData = pcall(function()
-                    return invokeRemote("RF/UFOSightings/Repair", "Begin")
-                end)
+                local ok, success, puzzleData = invokeRemote("RF/UFOSightings/Repair", "Begin")
 
                 if ok and success and type(puzzleData) == "table" and puzzleData.Seed then
                     local solvedRotations = self:SolvePipePuzzle(puzzleData.Seed)
                     if solvedRotations then
                         task.wait(3.4)
-                        pcall(function()
-                            invokeRemote("RF/UFOSightings/Repair", "Finish", { Id = puzzleData.Id, Rotations = solvedRotations })
-                        end)
+                        invokeRemote("RF/UFOSightings/Repair", "Finish", { Id = puzzleData.Id, Rotations = solvedRotations })
                         self:FetchState()
                         repairSuccess = true
                     end
@@ -1955,24 +1976,39 @@ function UFOManager:Process()
     -- 2. DECODE (Equip signal decoder, locate UFO with preserved gravity & runway alignment)
     elseif work == "decode" then
         local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-        local decoder = nil
-        for _, t in ipairs(root.Parent:GetChildren()) do
-            if t:IsA("Tool") and t:GetAttribute("UFOSignalDecoder") == true then decoder = t break end
-        end
-        if not decoder and backpack then
-            for _, t in ipairs(backpack:GetChildren()) do
-                if t:IsA("Tool") and t:GetAttribute("UFOSignalDecoder") == true then decoder = t break end
+        local function getDecoder()
+            for _, t in ipairs(root.Parent:GetChildren()) do
+                if t:IsA("Tool") and t:GetAttribute("UFOSignalDecoder") == true then return t end
             end
+            if backpack then
+                for _, t in ipairs(backpack:GetChildren()) do
+                    if t:IsA("Tool") and t:GetAttribute("UFOSignalDecoder") == true then return t end
+                end
+            end
+            return nil
         end
+
+        local decoder = getDecoder()
         if decoder and hum then
             pcall(function() hum:EquipTool(decoder) end)
-            local timeout = os.clock() + 45.0
+            local timeout = os.clock() + 60.0
             local bestSignal = 0
             local bestX = root.Position.X
             local dir = 1
+            local nextEquipCheck = os.clock() + 0.5
 
             while os.clock() < timeout do
                 if not self.State.st.Event or self.State.st.Decoded then break end
+
+                -- Re-equip check every 0.5s (matching hot.lua line 20706-20714)
+                if os.clock() >= nextEquipCheck then
+                    nextEquipCheck = os.clock() + 0.5
+                    local curDecoder = getDecoder()
+                    if curDecoder and curDecoder.Parent ~= root.Parent then
+                        pcall(function() hum:EquipTool(curDecoder) end)
+                    end
+                end
+
                 local signal = tonumber(self.State.st.Signal) or 0
                 local curX = root.Position.X
                 if signal > bestSignal then
@@ -1980,15 +2016,27 @@ function UFOManager:Process()
                     bestX = curX
                 end
 
-                if curX > 6950 and dir > 0 then dir = -1
-                elseif curX < 650 and dir < 0 then dir = 1 end
+                if curX > 6950 and dir > 0 then
+                    dir = -1
+                elseif curX < 650 and dir < 0 then
+                    dir = 1
+                end
 
                 local speed = (signal < 2 and 180) or 80
-                local targetVelX
+                local targetVelX = dir * speed
+
+                -- Peak-overshoot tracking and direction reversal matching hot.lua lines 20726-20736
                 if bestSignal >= 4 then
                     targetVelX = math.clamp((bestX - curX) * 5, -60, 60)
                 else
-                    targetVelX = dir * speed
+                    if signal < bestSignal then
+                        if math.abs(bestX - curX) < 20 then
+                            bestSignal = signal
+                            dir = -dir
+                        else
+                            targetVelX = math.sign(bestX - curX) * math.min(speed, 120)
+                        end
+                    end
                 end
 
                 -- Preserves AssemblyLinearVelocity.Y so Roblox gravity acts naturally (NO FLOATING!)
@@ -1998,7 +2046,7 @@ function UFOManager:Process()
                     root.AssemblyLinearVelocity.Y,
                     math.clamp((-365 - root.Position.Z) * 5, -50, 50)
                 )
-                task.wait(0.1)
+                task.wait(0.05)
             end
             root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
             pcall(function() hum:UnequipTools() end)
@@ -2007,12 +2055,22 @@ function UFOManager:Process()
 
     -- 3. BOARD RARE UFO MOTHERSHIP
     elseif work == "board" then
-        local ufoModel = self.State.st.Ufo
-        local uPos = ufoModel and (ufoModel:IsA("Model") and ufoModel:GetPivot().Position or ufoModel.Position)
+        local uPos = self:GetUfoPosition()
         if uPos then
-            root.CFrame = CFrame.new(uPos - Vector3.new(0, 85, 0))
+            local targetPos = uPos - Vector3.new(0, 85, 0)
+            -- Smooth approach over up to 2 seconds to avoid raw CFrame rubberbanding
+            local approachTimeout = os.clock() + 2.0
+            while os.clock() < approachTimeout and not self:IsInRareUFO() do
+                local diff = targetPos - root.Position
+                if diff.Magnitude <= 8 then break end
+                root.CFrame = CFrame.new(root.Position + diff.Unit * math.min(diff.Magnitude, 30))
+                root.AssemblyLinearVelocity = Vector3.zero
+                task.wait(0.08)
+            end
+            root.CFrame = CFrame.new(targetPos)
             root.AssemblyLinearVelocity = Vector3.zero
-            local timeout = os.clock() + 6.0
+
+            local timeout = os.clock() + 8.0
             while os.clock() < timeout and not self:IsInRareUFO() do
                 task.wait(0.1)
             end
@@ -2023,15 +2081,21 @@ function UFOManager:Process()
         local rareInterior = Services.Workspace:FindFirstChild("RareUFOInterior")
         local capsules = rareInterior and rareInterior:FindFirstChild("Interactables") and rareInterior.Interactables:FindFirstChild("Capsules")
 
-        -- Smash capsules with equipped melee weapon
-        local weapon = nil
-        for _, t in ipairs(root.Parent:GetChildren()) do if t:IsA("Tool") and t.Name ~= "UFOSignalDecoder" and t.Name ~= "Butterfly Net" then weapon = t break end end
-        if not weapon then
+        -- Smash capsules with equipped melee bat weapon
+        local function getWeapon()
+            for _, t in ipairs(root.Parent:GetChildren()) do
+                if t:IsA("Tool") and t.Name ~= "UFOSignalDecoder" and t.Name ~= "Butterfly Net" then return t end
+            end
             local bp = LocalPlayer:FindFirstChildOfClass("Backpack")
             if bp then
-                for _, t in ipairs(bp:GetChildren()) do if t:IsA("Tool") and t.Name ~= "UFOSignalDecoder" and t.Name ~= "Butterfly Net" then weapon = t break end end
+                for _, t in ipairs(bp:GetChildren()) do
+                    if t:IsA("Tool") and t.Name ~= "UFOSignalDecoder" and t.Name ~= "Butterfly Net" then return t end
+                end
             end
+            return nil
         end
+
+        local weapon = getWeapon()
         if weapon and hum and weapon.Parent ~= root.Parent then
             pcall(function() hum:EquipTool(weapon) end)
         end
@@ -2039,11 +2103,22 @@ function UFOManager:Process()
         if capsules then
             for _, cap in ipairs(capsules:GetChildren()) do
                 if cap:IsA("Model") and not (self.State.st.Interior and self.State.st.Interior.Broken and table.find(self.State.st.Interior.Broken, cap.Name)) then
+                    -- Collect rocks inside interior (matching hot.lua line 20839)
+                    local intRocks = self.State.st.Rocks
+                    if intRocks and intRocks.List then
+                        for _, r in ipairs(intRocks.List) do
+                            pcall(function() fireRemote("RE/UFOSightings/CollectRock", intRocks.Id, r.Index) end)
+                        end
+                    end
+
                     local capPos = cap:GetPivot().Position
                     root.CFrame = CFrame.new(capPos + Vector3.new(0, 1, 3))
                     root.AssemblyLinearVelocity = Vector3.zero
-                    if weapon then pcall(function() weapon:Activate() end) end
-                    task.wait(0.3)
+                    if weapon then
+                        if weapon.Parent ~= root.Parent then pcall(function() hum:EquipTool(weapon) end) end
+                        pcall(function() weapon:Activate() end)
+                    end
+                    task.wait(0.4)
                 end
             end
         end
@@ -2057,11 +2132,12 @@ function UFOManager:Process()
                 root.AssemblyLinearVelocity = Vector3.zero
                 task.wait(0.3)
                 for _, codeStr in ipairs(self.Codes) do
-                    local ok, success = pcall(function() return invokeRemote("RF/UFOSightings/VaultCode", codeStr) end)
-                    if ok and success then break end
+                    local ok, success = invokeRemote("RF/UFOSightings/VaultCode", codeStr)
+                    if ok and success == true then break end
                     task.wait(0.3)
                 end
                 task.wait(1.5)
+                self:FetchState()
             end
         end
 
@@ -2072,8 +2148,9 @@ function UFOManager:Process()
             root.CFrame = CFrame.new(staffRoot.Position + Vector3.new(0, 1, 0))
             root.AssemblyLinearVelocity = Vector3.zero
             task.wait(0.3)
-            pcall(function() invokeRemote("RF/UFOSightings/VaultClaim") end)
+            invokeRemote("RF/UFOSightings/VaultClaim")
             task.wait(0.5)
+            self:FetchState()
         end
 
         -- Exit Rare UFO
@@ -2081,31 +2158,42 @@ function UFOManager:Process()
         if leavePart then
             root.CFrame = CFrame.new(leavePart.Position)
             root.AssemblyLinearVelocity = Vector3.zero
-            local prompt = leavePart:FindFirstChildWhichIsA("ProximityPrompt", true)
-            if prompt then UniversalCompat.FireProximityPrompt(prompt) end
-            task.wait(1.0)
+            local prompt = leavePart:FindFirstChild("LeaveUFO") or leavePart:FindFirstChildWhichIsA("ProximityPrompt", true)
+            if prompt then
+                pcall(function()
+                    prompt.HoldDuration = 0
+                    UniversalCompat.FireProximityPrompt(prompt)
+                end)
+            end
+            local exitWait = os.clock() + 5.0
+            while os.clock() < exitWait and self:IsInRareUFO() do
+                task.wait(0.2)
+            end
         end
+        self.State.left = self.State.st.Event and self.State.st.Event.Id
         self:FetchState()
 
-    -- 5. ROCKS (Collect space rocks with smooth approach)
+    -- 5. ROCKS (Collect space rocks with distance check)
     elseif work == "rocks" then
         local rocks = self.State.st.Rocks
-        if rocks and rocks.List then
+        if rocks and rocks.List and #rocks.List > 0 then
             for _, rock in ipairs(rocks.List) do
                 if rock and rock.Position then
                     local dist = (root.Position - rock.Position).Magnitude
                     if dist > 20 then
                         root.CFrame = CFrame.new(rock.Position + Vector3.new(0, 2, 0))
                         root.AssemblyLinearVelocity = Vector3.zero
+                        task.wait(0.08)
                     end
                     pcall(function() fireRemote("RE/UFOSightings/CollectRock", rocks.Id, rock.Index) end)
-                    task.wait(0.15)
+                    task.wait(0.12)
                 end
             end
+            task.wait(0.3)
             self:FetchState()
         end
 
-    -- 6. TRADE (Trade rocks at camp)
+    -- 6. TRADE (Trade space rocks at Alien Camp - PRESERVED 100%)
     elseif work == "trade" then
         local camp = Services.Workspace:FindFirstChild("UFOSightingsCamp")
         local chaser = camp and camp:FindFirstChild("AlienChaser")
@@ -2133,10 +2221,13 @@ function UFOManager:Process()
     elseif work == "reward" then
         local reward = self.State.st.Reward
         if reward and reward.Position and reward.Id then
-            root.CFrame = CFrame.new(reward.Position + Vector3.new(0, 2, 0))
-            root.AssemblyLinearVelocity = Vector3.zero
-            task.wait(0.2)
-            pcall(function() invokeRemote("RF/UFOSightings/Collect", reward.Id) end)
+            local dist = (root.Position - reward.Position).Magnitude
+            if dist > 20 then
+                root.CFrame = CFrame.new(reward.Position + Vector3.new(0, 2, 0))
+                root.AssemblyLinearVelocity = Vector3.zero
+                task.wait(0.15)
+            end
+            invokeRemote("RF/UFOSightings/Collect", reward.Id)
             self:FetchState()
         end
 
@@ -2278,7 +2369,7 @@ function PriorityManager:IsTaskEnabled(taskName)
     if resolved == "Auto Steal" then
         return isStealEnabled() and not isMapClosed()
     elseif resolved == "UFO Event" then
-        return getgenv().config.autoUFO == true
+        return (getgenv().config.autoUFO == true or getgenv().config.ufoRocks == true or getgenv().config.ufoTrade == true or getgenv().config.ufoRare == true)
     elseif resolved == "Enchanted / Bloom Event" then
         return (getgenv().config.autoCatchButterfly == true or getgenv().config.autoWispQuest == true or getgenv().config.autoTradeUp == true or getgenv().config.autoCraftEssence == true) and not isMapClosed()
     elseif resolved == "Auto Treadmill" then
@@ -3412,6 +3503,11 @@ WorkerScheduler:Register("UFOEvent", 0.25, function()
     if State.isStealingActive or isHoldingEgg() then return end
     if not PriorityManager:CanRun("UFO") then return end
 
+    UFOManager.tick = (UFOManager.tick or 0) + 1
+    if (UFOManager.tick % 40) == 1 then
+        pcall(function() UFOManager:FetchState() end)
+    end
+
     if PriorityManager:Acquire("UFO", 25.0) then
         pcall(function() UFOManager:Process() end)
         PriorityManager:Release("UFO")
@@ -3472,7 +3568,39 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
             local stealSuccess = false
             if eggTargetPos then
                 local areaId = currentTargetEgg.AreaId
-                local canUseFastSteal = (getgenv().config.fastSteal == true) and isFastStealArea(areaId)
+                local isUfoEgg = UFOManager and UFOManager.IsUfoEgg and UFOManager:IsUfoEgg(currentTargetEgg, targetUid)
+                local canUfoTp = (getgenv().config.ufoTp == true) and isUfoEgg and root and ((root.Position - eggTargetPos).Magnitude >= 1000)
+                local canUseFastSteal = ((getgenv().config.fastSteal == true and isFastStealArea(areaId)) or canUfoTp)
+
+                local function tryDeliverToUfo()
+                    if not isUfoEgg then return false end
+                    local ufoPos = UFOManager:GetUfoPosition()
+                    if not ufoPos then return false end
+                    local d0 = UFOManager.State.st and UFOManager.State.st.Delivered or 0
+                    local _, cRoot = getAliveRig()
+                    if not cRoot then return false end
+
+                    -- Glide directly under UFO beam without teleporting back home
+                    local beamTarget = Vector3.new(ufoPos.X, math.max(ufoPos.Y - 60, cRoot.Position.Y), ufoPos.Z)
+                    local arriveTimeout = os.clock() + 4.0
+                    while os.clock() < arriveTimeout and isHoldingEgg() and (UFOManager.State.st.Delivered or 0) <= d0 do
+                        local _, curR = getAliveRig()
+                        if not curR then break end
+                        local diff = beamTarget - curR.Position
+                        if diff.Magnitude <= 15 then break end
+                        curR.CFrame = CFrame.new(curR.Position + diff.Unit * math.min(diff.Magnitude, 35))
+                        curR.AssemblyLinearVelocity = Vector3.zero
+                        task.wait(0.08)
+                    end
+
+                    -- Wait for UFO tractor beam suck-up
+                    local waitTimeout = os.clock() + 5.0
+                    while os.clock() < waitTimeout and isHoldingEgg() and (UFOManager.State.st.Delivered or 0) <= d0 do
+                        task.wait(0.1)
+                    end
+
+                    return (UFOManager.State.st.Delivered or 0) > d0
+                end
 
                 if canUseFastSteal then
                     local arrived = executeFastStealOutbound(eggTargetPos, session, targetUid)
@@ -3485,20 +3613,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                         local grabbed = instantGrabAtPosition(targetUid, eggTargetPos, session, false)
 
                         if (grabbed or isHoldingEgg()) and session == State.currentStealSession and isStealEnabled() then
-                            -- Check if UFO tractor beam delivery is active for this egg
-                            local isUfoTarget = UFOManager and UFOManager.IsUfoEgg and UFOManager:IsUfoEgg(currentTargetEgg, targetUid)
-                            if isUfoTarget and UFOManager.State.st.Ufo then
-                                local ufoPos = UFOManager.State.st.Ufo.Position
-                                local d0 = UFOManager.State.st.Delivered or 0
-                                local arrivedUFO = executeFastStealOutbound(ufoPos, session, targetUid)
-                                if arrivedUFO and session == State.currentStealSession then
-                                    local waitTimeout = os.clock() + 5.0
-                                    while os.clock() < waitTimeout and (UFOManager.State.st.Delivered or 0) <= d0 do
-                                        task.wait(0.1)
-                                    end
-                                    stealSuccess = (UFOManager.State.st.Delivered or 0) > d0
-                                end
-                            end
+                            stealSuccess = tryDeliverToUfo()
 
                             if not stealSuccess and (grabbed or isHoldingEgg()) and session == State.currentStealSession and isStealEnabled() then
                                 stealSuccess = executeFastStealDelivery(currentTargetEgg, session)
@@ -3514,7 +3629,11 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                         task.wait(0.04)
                         local grabbed = instantGrabAtPosition(targetUid, eggTargetPos, session, false)
                         if (grabbed or isHoldingEgg()) and session == State.currentStealSession and isStealEnabled() then
-                            stealSuccess = executeCheckpointedHopsHome(currentTargetEgg, session)
+                            stealSuccess = tryDeliverToUfo()
+
+                            if not stealSuccess and (grabbed or isHoldingEgg()) and session == State.currentStealSession and isStealEnabled() then
+                                stealSuccess = executeCheckpointedHopsHome(currentTargetEgg, session)
+                            end
                         end
                     end
                 end
@@ -3714,18 +3833,27 @@ ufoCategory:CreateToggle("Collect UFO Debris", "Collect space rocks across the w
     getgenv().config.ufoRocks = state
     currentSettings.UFORocks = state
     saveStuff()
+    if state and UFOManager and UFOManager.FetchState then
+        pcall(function() UFOManager:FetchState() end)
+    end
 end)
 
 ufoCategory:CreateToggle("Farm Rare UFO", "Board mothership, smash capsules, vault & alien staff", currentSettings.UFORare, function(state)
     getgenv().config.ufoRare = state
     currentSettings.UFORare = state
     saveStuff()
+    if state and UFOManager and UFOManager.FetchState then
+        pcall(function() UFOManager:FetchState() end)
+    end
 end)
 
 ufoCategory:CreateToggle("Auto Trade Debris", "Trade space rocks at Alien Camp", currentSettings.UFOTrade, function(state)
     getgenv().config.ufoTrade = state
     currentSettings.UFOTrade = state
     saveStuff()
+    if state and UFOManager and UFOManager.FetchState then
+        pcall(function() UFOManager:FetchState() end)
+    end
 end)
 
 ufoCategory:CreateToggle("Teleport If Far From Egg", "Rapid travel to distant UFO eggs", currentSettings.UFOTp, function(state)
