@@ -894,3 +894,24 @@ Furthermore, when users tapped the Sort button, Roblox dispatched the click in a
    - Prevented wrapper response objects (`{ Records={}, Carrying=false }`) from corrupting `State.cachedFieldEggs`.
    - Guarded all record indexing with `type(record) == "table"`.
    - Added `State.cachedStealPanelItems` persistent fallback cache so rendered cards are never destroyed on empty server ticks.
+
+
+### 6.23 UFO Event System Full Architecture & Discrepancy Resolution (Commit `7ccc80ae1423a81643b61c66d91e65ecf4ce5ee6`)
+
+#### Background & Root Causes
+Investigation revealed why only **Auto Trade Debris** functioned while all other UFO event features failed:
+1. **Double-pcall Remote Unpacking Discard Bug:** In `qualcom_clean.lua`, `invokeRemote()` already executes an internal `pcall` and returns `true, r1, r2, r3`. Callers that wrapped `invokeRemote` in an outer `pcall` captured `ok, success, puzzleData`, wherein `puzzleData` received `r1` (server boolean `true`), completely discarding `r2` (the puzzle table `{ Id = ..., Seed = ... }`). This caused `type(puzzleData) == "table"` to fail every time. A 60-second lockout was applied, freezing all downstream UFO tasks whenever `st.Unlocked == false`.
+2. **Runway Signal Peak Overshoot & Direction Tracking:** The decoder loop lacked the overshoot-reversal logic from `hot.lua` (lines 20726–20736). When signal dropped below peak (`signal < bestSignal`), `math.abs(bestX - curX) < 20` must reverse `dir` while tracking back with `math.sign(bestX - curX) * speed` along `Z = -365`. Furthermore, the decoder tool was only equipped once before the loop rather than monitored every 0.5s.
+3. **Tractor Beam Delivery Home-Plot Teleport Flaw:** When carrying an egg flagged as a UFO target, the script called `executeFastStealOutbound(ufoPos)`, which teleported the player back to `CONFIG.BaseDropPosition` (the home plot nest) into the sky portal, auto-depositing the egg into the home nest instead of delivering it under the UFO beam.
+4. **Collect UFO Debris & Farm Rare UFO Anti-Cheat Distance Rejection:** Instant raw CFrame snaps across the map triggered position validation errors on `RE/UFOSightings/CollectRock`. In Rare UFO motherships, vault code cracking had the same double-pcall return bug, breaking on the first code `4827` even when rejected by the server without trying `0327`, and proximity prompts did not force instant trigger with `HoldDuration = 0`.
+5. **Distant Egg Teleport (`ufoTp`):** Existed solely as an orphaned GUI toggle with zero integration into the steal outbound traversal pipeline.
+
+#### Architectural Fixes Implemented:
+- **Direct Remote Invocation:** Removed outer redundant `pcall` around `invokeRemote("RF/UFOSightings/Repair", "Begin")` and `RF/UFOSightings/VaultCode`, cleanly capturing `ok, success, puzzleData` and checking server-side return boolean.
+- **Autonomous Sub-Task Priority Arbitrator:** Separated master toggle from sub-features in `PriorityManager:IsTaskEnabled` and `UFOManager:HasWork()`, enabling independent execution for `ufoRocks`, `ufoTrade`, and `ufoRare`.
+- **Periodic State Synchronization & Startup:** Added automatic startup fetch and periodic 20-second refetches in `WorkerScheduler:Register("UFOEvent")` matching `hot.lua` line 21070.
+- **Dedicated Tractor Beam Delivery:** Replaced home-plot outbound calls with `tryDeliverToUfo()`, gliding the character directly under `ufoPos` while holding the egg and waiting for `Delivered > d0`.
+- **Runway Decode Steering:** Implemented true peak-tracking with direction reversal on overshoot along `Z = -365` with periodic 0.5s decoder tool re-equipping.
+- **Smooth Navigation for Rocks & Rare UFO:** Added distance-checked glide traversal within 20 studs for debris collection, safe boarding at -85 studs, keypad code validation, alien staff claims, and instant `LeaveUFO` prompt firing.
+- **Connected `ufoTp` Teleportation:** Linked `getgenv().config.ufoTp` to fast travel portal outbound routing whenever UFO target egg distance >= 1000 studs.
+- **100% Preservation:** Preserved Auto Trade Debris (`RF/UFOSightings/Trade`) and normal dimension egg stealing untouched.
