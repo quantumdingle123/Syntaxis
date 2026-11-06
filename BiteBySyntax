@@ -226,6 +226,7 @@ local State = {
     themeName = currentSettings.Theme or "Sapphire",
     isOpn = true,
     curCat = 1,
+    cachedFieldEggs = {},
     activeOpenedDropdown = nil,
     spSortChoice = "Value (Money/s)",
     spSortIndex = 1,
@@ -346,8 +347,8 @@ local function matchesTargetArea(areaId)
 end
 
 local function getRemote(pathName)
-    local packages = Services.ReplicatedStorage:FindFirstChild("Packages")
-    local networking = packages and packages:FindFirstChild("Networking")
+    local packages = Services.ReplicatedStorage:FindFirstChild("Packages") or (Services.ReplicatedStorage.WaitForChild and Services.ReplicatedStorage:WaitForChild("Packages", 3))
+    local networking = packages and (packages:FindFirstChild("Networking") or (packages.WaitForChild and packages:WaitForChild("Networking", 3)))
     local remote = networking and networking:FindFirstChild(pathName)
     if not remote then
         for _, desc in ipairs(Services.ReplicatedStorage:GetDescendants()) do
@@ -393,45 +394,83 @@ local function fireRemote(pathName, ...)
     return false
 end
 
-local _cachedEggState = nil
-local function getEggState()
-    if _cachedEggState then return _cachedEggState end
-    local client = Services.ReplicatedStorage:FindFirstChild("Client")
-    local mod = client and client:FindFirstChild("EggState")
-    if mod then
-        local ok, res = pcall(require, mod)
-        if ok and type(res) == "table" then
-            _cachedEggState = res
-            return res
+local GameModules = {}
+local _moduleCache = {}
+local modulePaths = {
+    EggState = { "Client", "EggState" },
+    Assets = { "Data", "Assets" },
+    Mutations = { "Shared", "Modules", "Mutations" },
+    EggRecords = { "Shared", "Util", "EggRecords" },
+    AreaEggCycle = { "Shared", "Util", "AreaEggCycle" },
+    PlotState = { "Client", "PlotState" },
+    UFOSightingsPipePuzzle = { "Shared", "Modules", "UFOSightingsPipePuzzle" }
+}
+
+function GameModules:Get(name)
+    if _moduleCache[name] then return _moduleCache[name] end
+    local path = modulePaths[name]
+    if not path then return nil end
+
+    local current = Services.ReplicatedStorage
+    for _, part in ipairs(path) do
+        current = current and (current:FindFirstChild(part) or (current.WaitForChild and current:WaitForChild(part, 3)))
+        if not current then break end
+    end
+
+    if current and current:IsA("ModuleScript") then
+        local setid = setthreadidentity or set_thread_identity
+        if setid then pcall(setid, 8) end
+        local ok, mod = pcall(require, current)
+        if ok and type(mod) == "table" then
+            _moduleCache[name] = mod
+            return mod
         end
     end
     return nil
 end
 
+local function getEggState()
+    return GameModules:Get("EggState")
+end
+
 local EggState = getEggState()
 
 local function getFieldEggRecords()
-    -- Path 1: Client EggState.ReadFieldEggs() with dynamic require retry
-    local es = getEggState() or EggState
+    -- Path 1: Client EggState.ReadFieldEggs() with elevated identity 8
+    local es = GameModules:Get("EggState") or EggState or getEggState()
     if es and typeof(es.ReadFieldEggs) == "function" then
+        local setid = setthreadidentity or set_thread_identity
+        if setid then pcall(setid, 8) end
         local ok, data = pcall(es.ReadFieldEggs)
-        if ok and type(data) == "table" and type(data.Records) == "table" and next(data.Records) ~= nil then
-            return data.Records
+        if ok and type(data) == "table" then
+            if type(data.Records) == "table" and next(data.Records) ~= nil then
+                State.cachedFieldEggs = data.Records
+                return data.Records
+            elseif next(data) ~= nil then
+                State.cachedFieldEggs = data
+                return data
+            end
         end
     end
 
     -- Path 2: Network Snapshot Fallback (RF/EggWorld/AskFieldEggSnapshot)
-    local snapshotRemote = getRemote("RF/EggWorld/AskFieldEggSnapshot")
+    local snapshotRemote = getRemote("RF/EggWorld/AskFieldEggSnapshot") or (Remotes and Remotes.AskSnapshot)
     if snapshotRemote and snapshotRemote:IsA("RemoteFunction") then
         local ok, data = pcall(function() return snapshotRemote:InvokeServer() end)
         if ok and type(data) == "table" then
             if type(data.Records) == "table" and next(data.Records) ~= nil then
+                State.cachedFieldEggs = data.Records
                 return data.Records
-            end
-            if next(data) ~= nil then
+            elseif next(data) ~= nil then
+                State.cachedFieldEggs = data
                 return data
             end
         end
+    end
+
+    -- Path 3: Fallback to persistent cached eggs if live fetch temporarily yielded nil
+    if State.cachedFieldEggs and next(State.cachedFieldEggs) ~= nil then
+        return State.cachedFieldEggs
     end
 
     return {}
@@ -1556,8 +1595,15 @@ end
 function UFOManager:HasWork()
     if not getgenv().config.autoUFO then return nil end
     local st = self.State.st or {}
+
+    -- Strict hot.lua event gate (lines 20295-20330): if UFO event is not available or locked, do NOTHING
+    if not st.Available then return nil end
+    if st.SpeedLocked or st.Tutorial then return nil end
+    if State.isStealingActive or isHoldingEgg() then return nil end
+
     if self:IsInRareUFO() then return "inside" end
     if os.clock() < (self.State.no or 0) then return nil end
+    if isMapClosed() then return nil end
 
     if not st.Unlocked then return "repair" end
     if st.Reward then return "reward" end
@@ -1574,7 +1620,7 @@ end
 function UFOManager:IsUfoEgg(eggRecord, uid)
     if not getgenv().config.autoUFO then return false end
     local st = self.State.st
-    if not (st and st.Event and st.Decoded and not st.Complete and st.Event.Variant ~= "Rare") then
+    if not (st and st.Available and st.Event and st.Decoded and not st.Complete and st.Event.Variant ~= "Rare") then
         return false
     end
     if uid and self.State.sus[uid] then return true end
@@ -1595,6 +1641,7 @@ function UFOManager:Process()
     -- 1. REPAIR (NPC talk + 5x5 Pipe Puzzle)
     if work == "repair" then
         local camp = Services.Workspace:FindFirstChild("UFOSightingsCamp")
+        local repairSuccess = false
         if camp then
             if not self.State.st.MetChaser then
                 local chaser = camp:FindFirstChild("AlienChaser")
@@ -1626,12 +1673,17 @@ function UFOManager:Process()
                             invokeRemote("RF/UFOSightings/Repair", "Finish", { Id = puzzleData.Id, Rotations = solvedRotations })
                         end)
                         self:FetchState()
+                        repairSuccess = true
                     end
                 end
             end
         end
+        -- Back off 60s if repair was not ready or failed (matching hot.lua line 21045)
+        if not repairSuccess then
+            self.State.no = os.clock() + 60
+        end
 
-    -- 2. DECODE (Equip signal decoder, locate UFO)
+    -- 2. DECODE (Equip signal decoder, locate UFO with preserved gravity & runway alignment)
     elseif work == "decode" then
         local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
         local decoder = nil
@@ -1663,13 +1715,23 @@ function UFOManager:Process()
                 elseif curX < 650 and dir < 0 then dir = 1 end
 
                 local speed = (signal < 2 and 180) or 80
+                local targetVelX
                 if bestSignal >= 4 then
-                    root.AssemblyLinearVelocity = Vector3.new(math.clamp((bestX - curX) * 5, -60, 60), 0, 0)
+                    targetVelX = math.clamp((bestX - curX) * 5, -60, 60)
                 else
-                    root.AssemblyLinearVelocity = Vector3.new(dir * speed, 0, 0)
+                    targetVelX = dir * speed
                 end
+
+                -- Preserves AssemblyLinearVelocity.Y so Roblox gravity acts naturally (NO FLOATING!)
+                -- Actively steers character along runway at Z = -365 (matching hot.lua line 20735)
+                root.AssemblyLinearVelocity = Vector3.new(
+                    targetVelX,
+                    root.AssemblyLinearVelocity.Y,
+                    math.clamp((-365 - root.Position.Z) * 5, -50, 50)
+                )
                 task.wait(0.1)
             end
+            root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
             pcall(function() hum:UnequipTools() end)
             self:FetchState()
         end
@@ -1756,16 +1818,19 @@ function UFOManager:Process()
         end
         self:FetchState()
 
-    -- 5. ROCKS (Collect space rocks)
+    -- 5. ROCKS (Collect space rocks with smooth approach)
     elseif work == "rocks" then
         local rocks = self.State.st.Rocks
         if rocks and rocks.List then
             for _, rock in ipairs(rocks.List) do
                 if rock and rock.Position then
-                    root.CFrame = CFrame.new(rock.Position + Vector3.new(0, 2, 0))
-                    root.AssemblyLinearVelocity = Vector3.zero
+                    local dist = (root.Position - rock.Position).Magnitude
+                    if dist > 20 then
+                        root.CFrame = CFrame.new(rock.Position + Vector3.new(0, 2, 0))
+                        root.AssemblyLinearVelocity = Vector3.zero
+                    end
                     pcall(function() fireRemote("RE/UFOSightings/CollectRock", rocks.Id, rock.Index) end)
-                    task.wait(0.1)
+                    task.wait(0.15)
                 end
             end
             self:FetchState()
@@ -1777,6 +1842,7 @@ function UFOManager:Process()
         local chaser = camp and camp:FindFirstChild("AlienChaser")
         local tradePoint = chaser and chaser:FindFirstChild("HumanoidRootPart") and chaser.HumanoidRootPart:FindFirstChild("TradePoint")
         local tPos = tradePoint and (tradePoint:IsA("Attachment") and tradePoint.WorldPosition or tradePoint.Position)
+        local tradeSuccess = false
         if tPos then
             root.CFrame = CFrame.new(tPos + Vector3.new(0, 2, 0))
             root.AssemblyLinearVelocity = Vector3.zero
@@ -1784,9 +1850,14 @@ function UFOManager:Process()
             while (self.State.st.SpaceRocks or 0) >= (self.State.st.RockCost or math.huge) do
                 local ok, traded = pcall(function() return invokeRemote("RF/UFOSightings/Trade", self.State.st.RockCost) end)
                 if not ok or not traded then break end
+                tradeSuccess = true
                 self:FetchState()
                 task.wait(0.3)
             end
+        end
+        -- Back off 60s if trade was not ready or failed (matching hot.lua line 21045)
+        if not tradeSuccess then
+            self.State.no = os.clock() + 60
         end
 
     -- 7. REWARD (Collect decoded/event reward)
@@ -1799,6 +1870,19 @@ function UFOManager:Process()
             pcall(function() invokeRemote("RF/UFOSightings/Collect", reward.Id) end)
             self:FetchState()
         end
+
+    -- 8. HOLD (Wait for tractor beam egg delivery without hogging character)
+    elseif work == "hold" then
+        root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+        local holdTimeout = os.clock() + 5.0
+        while os.clock() < holdTimeout do
+            local st = self.State.st
+            if not (st and st.Available and st.Event and st.Decoded and not st.Complete and st.Event.Variant ~= "Rare") then
+                break
+            end
+            task.wait(0.2)
+        end
+        self:FetchState()
     end
 
     self.IsBusy = false
@@ -3486,26 +3570,10 @@ local function getStealPanelEggItems()
         end
     end
 
-    -- Lazy load game Assets and Mutations modules
-    local assetsDir = nil
-    pcall(function()
-        local aMod = Services.ReplicatedStorage:FindFirstChild("Data") and Services.ReplicatedStorage.Data:FindFirstChild("Assets")
-        if aMod then
-            local ok, a = pcall(require, aMod)
-            if ok and a and type(a.Directory) == "table" then
-                assetsDir = a.Directory
-            end
-        end
-    end)
-
-    local mutationsMod = nil
-    pcall(function()
-        local mMod = Services.ReplicatedStorage:FindFirstChild("Shared") and Services.ReplicatedStorage.Shared:FindFirstChild("Modules") and Services.ReplicatedStorage.Shared.Modules:FindFirstChild("Mutations")
-        if mMod then
-            local ok, m = pcall(require, mMod)
-            if ok and type(m) == "table" then mutationsMod = m end
-        end
-    end)
+    -- Lazy load game Assets and Mutations modules via GameModules
+    local assetsMod = GameModules:Get("Assets")
+    local assetsDir = assetsMod and assetsMod.Directory
+    local mutationsMod = GameModules:Get("Mutations")
 
     local eggItems = {}
 
@@ -3514,14 +3582,16 @@ local function getStealPanelEggItems()
         record.Uid = uid
 
         if type(record) == "table" and type(uid) == "string" and string.sub(uid, 1, 12) ~= "FirstAreaEgg" and not isBlacklisted(uid) then
-            if record.State == "Slot" or record.State == "Dropped" or record.State == "Placed" or record.State == nil then
+            local state = record.State
+            -- Support Slot, Dropped, Carried, Placed and nil states (matching hot.lua line 7755)
+            if state == "Slot" or state == "Dropped" or state == "Carried" or state == "Placed" or state == nil then
                 local cat = tostring(record.AssetCategory or record.Category or record.Name or "Unknown")
                 local assetData = (assetsDir and assetsDir[cat]) or MasterRegistry.PetDatabase[cat] or {}
 
                 local displayName = tostring(assetData.DisplayName or cat)
                 local rarityData = (type(assetData.Rarity) == "table" and assetData.Rarity) or {}
                 local rarityName = tostring(rarityData.DisplayName or rarityData._id or assetData.Rarity or "Common")
-                local rarityRank = tonumber(rarityData.RarityNumber or rarityData.Rank or assetData.Rank) or 1
+                local rarityRank = tonumber(rarityData.RarityNumber or rarityData.Rank or assetData.Rank) or (MasterRegistry.RarityRanks and MasterRegistry.RarityRanks[rarityName]) or 1
 
                 local scale = tonumber(record.AssetScale) or 1
                 local scaleFactor = (scale > 5) and (((scale / 5) ^ 1.2) * 19.637875755794113) or (scale ^ 1.85)
@@ -3603,11 +3673,11 @@ local SettingsTab = Window:CreateSettingsTab("Settings", "Settings", {
     end
 })
 
--- Background Refresh for Steal Panel (every 2s while panel is active)
+-- Background Refresh for Steal Panel (every 1.5s while panel is visible)
 task.spawn(function()
     while true do
-        task.wait(2)
-        if StealPanelTab.Page and StealPanelTab.Page.Visible and State.isOpn and not State.isStealingActive and renderStealPanel then
+        task.wait(1.5)
+        if StealPanelTab.Page and StealPanelTab.Page.Visible and not State.isStealingActive and renderStealPanel then
             pcall(renderStealPanel)
         end
     end
