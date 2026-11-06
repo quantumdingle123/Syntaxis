@@ -700,6 +700,26 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 
 ---
 
+### 6.17 Sunsetting & Complete Removal of Halloween Event 2026
+- **Event Conclusion & Dead Code Elimination:**
+  - With the conclusion of the seasonal Halloween 2026 event in-game, all associated seasonal modules, managers, background workers, dimension detectors, and UI controls were cleanly removed from the master script.
+  - Eliminated ~4,100 lines of seasonal managers: `HalloweenPortalManager`, `HalloweenAreaManager`, `HalloweenCombatManager`, `HalloweenPumpkinManager`, `HalloweenStealManager`, `HalloweenBossManager`, `GhostDogManager`, `HalloweenFishingManager`, and `PhantomExpressManager`.
+  - Terminated 7 seasonal background worker coroutines: `CandyCaneFarm`, `HalloweenPumpkin`, `HalloweenBoss`, `GhostDog`, `HalloweenFishing`, `PhantomExpress`, and `AutoBuyHalloweenEgg`.
+  - Removed `FarmTab` "Halloween Event 2026" category and all 11 seasonal toggles/dropdowns.
+  - Removed seasonal settings from `defaultSettings`, `currentSettings`, `getgenv().config`, and `State`.
+  - Reduced script footprint by >60% (from 297,583 bytes down to 113,040 bytes; from 7,685 lines down to 2,975 lines).
+- **PriorityManager Streamlining:**
+  - Reconfigured task hierarchy strictly for permanent core tasks:
+    1. `Auto Steal`
+    2. `Enchanted / Bloom Event`
+    3. `Auto Treadmill`
+  - Eliminated dimension routing arbitration (`GetTaskDimension` defaults to `"Normal"`).
+- **Core Automation Integrity:**
+  - Normal Dimension Auto Steal (`executeFastStealOutbound`, `executeFastStealDelivery`, `executeCheckpointedHopsHome`, instant grab, boundary checkpoint $X = 600.2$, 45-stud micro-hops) remains **100% byte-for-byte preserved**.
+  - Plot Treadmill idle training and Bloom / Enchanted Event remain fully operational.
+
+---
+
 ## 9. Commit History & Version Milestones
 
 | Commit SHA | Commit Title / Name | Description |
@@ -742,3 +762,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `8597e0daaf2f46cdbf8f668735a7b2ca9e9f5ea1` | `feat(restore): migrate & restore complete script to quantumdingle123/Syntaxis (BiteBySyntax) & GUILib` | Fully restored 100% of GUILib to quantumdingle123/GUILib (SyntaxisLib.lua & all src/ modules) and updated quantumdingle123/Syntaxis/BiteBySyntax with the latest master script. Verified 100% byte-for-byte identical via GitHub raw API. |
 | `b6f3fb85419b46cfb4bbae27ce027c2a059f9af3` | `feat(restore): create private repository quantumdingle123/hot with hot.lua and analysis.md` | Created private repository quantumdingle123/hot and restored complete hot.lua (1.8 MB) reference file alongside analysis.md. |
 | `1db44d97e1a82148e0d3259eadf8a19e1f512efd` | `fix(combat): eliminate inventory tool leakage & arm flapping in bat switching via hot.lua engine` | Centralized `isCombatWeapon` engine with strict non-weapon exclusions, multi-weapon keyword whitelist, attribute checks, eliminated `#weapons == 0` inventory dump, eliminated single-bat arm flapping, and integrated cooldown-aware switching across `HalloweenCombatManager` and `HalloweenBossManager`. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `fe9aa6c3f6ed1ce0cdfbc500b28ee35b632f55a2` | `feat(cleanup): complete removal of Halloween Event 2026 modules, managers, workers & GUI categories` | Cleaned 4,710 lines of Halloween code: purged 9 seasonal managers, 7 background workers, dimension supervisors, and GUI controls. Streamlined `PriorityManager` to 3 core tasks. Reduced script footprint by >60% (297 KB -> 113 KB). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
