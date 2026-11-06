@@ -873,3 +873,24 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `8a6d9fad62c38251bc8e6305b1bd5aa42e08240d` | `fix(steal-panel): resolve vanishing display via type-safe records validation & persistent item cache` | Eliminated wrapper return corruption in `getFieldEggRecords`, protected `record.Uid` indexing with `type(record) == "table"`, added `State.cachedStealPanelItems` persistence cache matching `hot.lua`, and preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `54bd8f577ca632cd0165f89b0e5a95c7284b7c20` | `fix(wisp): stabilize auto wisp quest with hot.lua event gating, outdoor anchor & smooth stepping` | Precondition gating (50B speed power & forest reveal), eliminated blind Claim remote spam, outdoor WispAnchor return, smooth waypoint stepping (StepTowards), fusery automation & 100% normal steal preservation. |
 | `b9c304d6344cb339d842f95c1fda24662a4ef26d` | `fix(steal-ufo): restore steal panel via GameModules loader & fix UFO event physics & availability gating` | Fixed Steal Panel blank display via GameModules dot-path traversal loader, elevated thread identity 8, multi-path resolution (Client EggState -> RF snapshot -> persistent cache), Carried state support & asset directory lookup; fixed Auto UFO tweaking/teleporting/floating via strict st.Available event gating, Y-gravity preservation in decode mode, runway Z-alignment (-365), 60s failure backoff & smooth rock approach. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+
+
+### 6.22 Luau Capability Security & Thread Identity Isolation Architecture (Commit `c529337605c583a7436fed57aabc67ac92acacb8` & GUILib `ddfd7c79122f9bd446e940df9f6e261dfc68c19d`)
+
+#### The Problem & Modern Roblox Security Model
+In modern Roblox Luau (2024-2025+), the engine enforces strict **Script Capabilities** (e.g. `Plugin`, `LocalUser`, `RobloxScript`, etc.). Protected containers like `gethui()` or `CoreGui` require `Plugin` capabilities to create or modify child instances.
+When `getFieldEggRecords()` elevated to `setthreadidentity(8)` to call `EggState.ReadFieldEggs()`, Identity 8 lacked `Plugin` capability on mobile executors (Delta, Codex, Arceus X). Because identity was never restored back to Identity 7, the thread returned to `renderStealPanel()` at Identity 8. Calling `Instance.new("Frame", spListScrl)` immediately triggered:
+`The current thread cannot access 'Instance' (lacking capability Plugin)` at Line 2312.
+Furthermore, when users tapped the Sort button, Roblox dispatched the click in an event thread (Identity 2) without `Plugin` capability, which called `renderStealPanel()` at Line 2386 without `pcall`, crashing and logging to developer console.
+
+#### 4-Layer Resolution Implemented:
+1. **Thread Identity Isolation & Restoration in `qualcom_clean.lua`:**
+   - In `GameModules:Get` and `getFieldEggRecords`, recorded original identity (`oldId = getid and getid()`), called privileged function at identity 8, and immediately restored `setid(oldId)`. The UI thread never leaves identity 7.
+2. **Safe Instance Creation in `SyntaxisLib.lua`:**
+   - Eliminated deprecated 2-argument form `Instance.new("Frame", spListScrl)`. Instantiated Frame independently and parented at the end via `pcall(function() card.Parent = spListScrl end)`.
+3. **Thread Capability Elevation in `renderStealPanel`:**
+   - Added `pcall(setid, 7)` at the entry point of `renderStealPanel` and wrapped `spSortBtn.MouseButton1Click` in `pcall(renderStealPanel)`.
+4. **Item Caching & Type Validation:**
+   - Prevented wrapper response objects (`{ Records={}, Carrying=false }`) from corrupting `State.cachedFieldEggs`.
+   - Guarded all record indexing with `type(record) == "table"`.
+   - Added `State.cachedStealPanelItems` persistent fallback cache so rendered cards are never destroyed on empty server ticks.
