@@ -720,6 +720,38 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 
 ---
 
+### 6.18 UFO Event Suite, Dual-Path Steal Panel Pipeline & Anti-Cheat Safe Bloom Overhaul (hot.lua reference)
+- **1. UFO Event Complete Automation Suite (`hot.lua` lines 20160–21120):**
+  - **State Machine Architecture:** Recreated the complete autonomous UFO state machine tracking phases: `repair`, `decode`, `board`, `inside`, `rocks`, `trade`, `reward`, and `hold`.
+  - **Bitmask Pipe Puzzle Auto-Solver:** Integrated the 5x5 pipe rotation solver using `ReplicatedStorage.Shared.Modules.UFOSightingsPipePuzzle.Generate(seed)`. Computes 4-bit edge connection masks (`(mask << 1) | (mask >> 3) & 15`) and evaluates connected grid reachability from `(0, 0)` to `(4, 4)`, automatically rotating misaligned tiles via `RF/UFOSightings/RotatePipe`.
+  - **Signal Decoder Auto-Scan:** Automatically equips `UFOSignalDecoder` tool, samples directional signal readings along the X-axis (`SignalStrength` / `SignalFrequency`), and triangulates the active UFO location.
+  - **Rare UFO Mothership Interior (`RareUFOInterior`):** Full mothership sequence: smashes interior containment capsules using equipped combat bats, solves keypad security codes (`4827` / `0327`), interacts with the alien staff vault via `RF/UFOSightings/VaultClaim`, and smoothly exits via the `LeaveUFO` prompt.
+  - **Tractor Beam Egg Delivery:** Integrated with Auto Steal delivery pipeline. Delivers suspicious/biome eggs directly to the UFO tractor beam (`ufo.st.Ufo.Position`) until the server increments `st.Delivered`, unlocking the coveted `"Abducted"` egg mutation (`Color3.fromRGB(181, 255, 165)`).
+  - **Space Rocks & Alien Camp Debris Trading:** Sweeps scattered space rock debris across the world via `RE/UFOSightings/CollectRock` and automates batch trades at `AlienChaser.TradePoint` via `RF/UFOSightings/Trade`.
+  - **Task Priority Integration:** Registered Rank-2 task `"UFO Event"` in `PriorityManager` (between `"Auto Steal"` and `"Enchanted / Bloom Event"`).
+
+- **2. Steal Panel Dual-Path Retrieval & Exact Math Fix (`hot.lua` lines 7336–7372 & 28456–28560):**
+  - **The Defect Fixed:** Previously, the Steal Panel rendered completely blank because `EggState` was required only once during script startup with a strict 5s timeout. If `EggState` failed to require initially or returned empty records, the panel permanently failed to populate.
+  - **Dual-Path Resilient Snapshot Pipeline:**
+    1. *Path 1 (Client Dynamic Require):* Uses `getEggState()` with lazy pcall retries to dynamically acquire `EggState` from `ReplicatedStorage.Client.EggState`.
+    2. *Path 2 (Network RemoteFunction Fallback):* If `EggState.ReadFieldEggs()` returns nil or empty records, immediately invokes `RF/EggWorld/AskFieldEggSnapshot` to retrieve the latest live server snapshot of field eggs.
+  - **Game Asset Metadata & Exact Earning Rate:** Replaced inaccurate database fallback with direct inspection of `ReplicatedStorage.Data.Assets.Directory[record.AssetCategory]`, extracting true base `EarningRate`, rarity displayName, and icon thumbnail.
+  - **Exact Value & Mutation Math:** Accurately evaluates pet value using `baseRate * scaleFactor * mutationMultiplier` (computing mutations dynamically via `ReplicatedStorage.Shared.Modules.Mutations.EarningsFor(record.Mutations)`).
+  - **Exclusion Filters:** Strictly filters out dummy `FirstAreaEgg` entries and user-blacklisted eggs.
+
+- **3. Anti-Cheat Safe Bloom & Enchanted Event Overhaul (`hot.lua` lines 15330–17240):**
+  - **The Defect Fixed:** Previous implementation executed raw cross-map coordinate teleports, set vertical `AssemblyLinearVelocity = 320` mid-air, and polled 50,000 workspace instances every 0.35s with `GetDescendants()`, triggering immediate anticheat rubberbands and flag kicks.
+  - **Attribute Gating:** Execution is strictly gated behind `workspace:GetAttribute("Event_ButterflyBloom") == true`.
+  - **Event-Driven Remote Tracking:** Listens to `RE/Butterflies/Spawned` and `RE/Butterflies/Removed`, maintaining an internal lightweight `TrackedButterflies` table with 0 workspace traversal overhead.
+  - **Safe Ground Raycasting:** Pins character movement strictly to terrain using `workspace:Raycast(pos + Vector3.new(0, 25, 0), Vector3.new(0, -120, 0))`, eliminating mid-air floating flags.
+  - **Dual Catch Modes:**
+    1. *"Stand" Mode (Zero-Risk):* Stands at the center blossom clearing (`Vector3.new(6700, 74, -364)`) with equipped `ButterflyNet` tool, swinging at butterflies as they enter the 14-stud `NetReach` radius. Zero travel, zero flag risk.
+    2. *"Chase" Mode (Ground Glide):* Performs smooth ground-level linear gliding at safe speeds, prioritizing rarest tiers (`Golden` > `Purple` > `Blue` > `Green`) or nearest distance.
+  - **Safe Tree Transit:** Navigates naturally to `EnchantedTreeEntrance` and `ExitTrigger` prompts, validating `LocalPlayer:GetAttribute("InEnchantedTree") == true` before initiating indoor crafting.
+  - **Smart Trade-Up Calculations:** Exact mathematical calculations for butterfly conversion (`GreenToBlue = 10`, `BlueToPurple = 10`, `PurpleToGolden = 50`, `Essence = 240/115/40/1`), preventing wasteful butterfly consumption.
+
+---
+
 ## 9. Commit History & Version Milestones
 
 | Commit SHA | Commit Title / Name | Description |
@@ -763,3 +795,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `b6f3fb85419b46cfb4bbae27ce027c2a059f9af3` | `feat(restore): create private repository quantumdingle123/hot with hot.lua and analysis.md` | Created private repository quantumdingle123/hot and restored complete hot.lua (1.8 MB) reference file alongside analysis.md. |
 | `1db44d97e1a82148e0d3259eadf8a19e1f512efd` | `fix(combat): eliminate inventory tool leakage & arm flapping in bat switching via hot.lua engine` | Centralized `isCombatWeapon` engine with strict non-weapon exclusions, multi-weapon keyword whitelist, attribute checks, eliminated `#weapons == 0` inventory dump, eliminated single-bat arm flapping, and integrated cooldown-aware switching across `HalloweenCombatManager` and `HalloweenBossManager`. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `fe9aa6c3f6ed1ce0cdfbc500b28ee35b632f55a2` | `feat(cleanup): complete removal of Halloween Event 2026 modules, managers, workers & GUI categories` | Cleaned 4,710 lines of Halloween code: purged 9 seasonal managers, 7 background workers, dimension supervisors, and GUI controls. Streamlined `PriorityManager` to 3 core tasks. Reduced script footprint by >60% (297 KB -> 113 KB). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `d9d2fa385f1486799798c7eaccacf7cc43351d8c` | `feat(ufo-bloom-steal): implement UFO event suite, dual-path steal panel & anti-cheat safe bloom` | Full UFO Event suite (state machine, bitmask pipe puzzle solver, signal decoder, rare mothership interior & vault, tractor beam egg delivery & debris trading); Steal Panel dual-path snapshot pipeline & asset directory metadata lookup; anti-cheat safe Bloom/Enchanted overhaul (event-driven remote tracking, ground raycasting, Stand/Chase modes, prompt tree transit & smart trade math). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
