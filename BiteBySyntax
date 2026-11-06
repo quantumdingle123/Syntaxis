@@ -227,6 +227,7 @@ local State = {
     isOpn = true,
     curCat = 1,
     cachedFieldEggs = {},
+    cachedStealPanelItems = {},
     activeOpenedDropdown = nil,
     spSortChoice = "Value (Money/s)",
     spSortIndex = 1,
@@ -444,14 +445,9 @@ local function getFieldEggRecords()
         local setid = setthreadidentity or set_thread_identity
         if setid then pcall(setid, 8) end
         local ok, data = pcall(es.ReadFieldEggs)
-        if ok and type(data) == "table" then
-            if type(data.Records) == "table" and next(data.Records) ~= nil then
-                State.cachedFieldEggs = data.Records
-                return data.Records
-            elseif next(data) ~= nil then
-                State.cachedFieldEggs = data
-                return data
-            end
+        if ok and type(data) == "table" and type(data.Records) == "table" and next(data.Records) ~= nil then
+            State.cachedFieldEggs = data.Records
+            return data.Records
         end
     end
 
@@ -459,19 +455,14 @@ local function getFieldEggRecords()
     local snapshotRemote = getRemote("RF/EggWorld/AskFieldEggSnapshot") or (Remotes and Remotes.AskSnapshot)
     if snapshotRemote and snapshotRemote:IsA("RemoteFunction") then
         local ok, data = pcall(function() return snapshotRemote:InvokeServer() end)
-        if ok and type(data) == "table" then
-            if type(data.Records) == "table" and next(data.Records) ~= nil then
-                State.cachedFieldEggs = data.Records
-                return data.Records
-            elseif next(data) ~= nil then
-                State.cachedFieldEggs = data
-                return data
-            end
+        if ok and type(data) == "table" and type(data.Records) == "table" and next(data.Records) ~= nil then
+            State.cachedFieldEggs = data.Records
+            return data.Records
         end
     end
 
     -- Path 3: Fallback to persistent cached eggs if live fetch temporarily yielded nil
-    if State.cachedFieldEggs and next(State.cachedFieldEggs) ~= nil then
+    if State.cachedFieldEggs and type(State.cachedFieldEggs) == "table" and next(State.cachedFieldEggs) ~= nil then
         return State.cachedFieldEggs
     end
 
@@ -1105,9 +1096,11 @@ local function isEggStillValid(uid)
     if not data or not data.Records then return true end
 
     for rUid, record in pairs(data.Records) do
-        if rUid == uid or record.Uid == uid then
-            if record.State == "Claimed" or record.State == "Carried" then return false end
-            return true
+        if type(record) == "table" then
+            if rUid == uid or record.Uid == uid then
+                if record.State == "Claimed" or record.State == "Carried" then return false end
+                return true
+            end
         end
     end
     return false
@@ -3823,16 +3816,18 @@ local PriorityTab = Window:CreatePriorityTab("Priority", "Task Priority", {
 -- ==============================================================================
 local function getStealPanelEggItems()
     local records = getFieldEggRecords()
-    if not records or next(records) == nil then
-        return {}
+    if not records or type(records) ~= "table" or next(records) == nil then
+        return State.cachedStealPanelItems or {}
     end
 
     if State.targetedSpecificUid and not isHoldingEgg() and not State.isStealingActive then
         local found = false
         for uid, record in pairs(records) do
-            if uid == State.targetedSpecificUid or record.Uid == State.targetedSpecificUid then
-                found = true
-                break
+            if type(record) == "table" then
+                if uid == State.targetedSpecificUid or record.Uid == State.targetedSpecificUid then
+                    found = true
+                    break
+                end
             end
         end
         if not found then
@@ -3848,56 +3843,62 @@ local function getStealPanelEggItems()
     local eggItems = {}
 
     for keyUid, record in pairs(records) do
-        local uid = record.Uid or keyUid
-        record.Uid = uid
+        if type(record) == "table" then
+            local uid = (type(record.Uid) == "string" and record.Uid) or (type(keyUid) == "string" and keyUid) or nil
+            record.Uid = uid
 
-        if type(record) == "table" and type(uid) == "string" and string.sub(uid, 1, 12) ~= "FirstAreaEgg" and not isBlacklisted(uid) then
-            local state = record.State
-            -- Support Slot, Dropped, Carried, Placed and nil states (matching hot.lua line 7755)
-            if state == "Slot" or state == "Dropped" or state == "Carried" or state == "Placed" or state == nil then
-                local cat = tostring(record.AssetCategory or record.Category or record.Name or "Unknown")
-                local assetData = (assetsDir and assetsDir[cat]) or MasterRegistry.PetDatabase[cat] or {}
+            if type(uid) == "string" and string.sub(uid, 1, 12) ~= "FirstAreaEgg" and not isBlacklisted(uid) then
+                local state = record.State
+                -- Support Slot, Dropped, Carried, Placed and nil states (matching hot.lua line 7755)
+                if state == "Slot" or state == "Dropped" or state == "Carried" or state == "Placed" or state == nil then
+                    local cat = tostring(record.AssetCategory or record.Category or record.Name or "Unknown")
+                    local assetData = (assetsDir and assetsDir[cat]) or MasterRegistry.PetDatabase[cat] or {}
 
-                local displayName = tostring(assetData.DisplayName or cat)
-                local rarityData = (type(assetData.Rarity) == "table" and assetData.Rarity) or {}
-                local rarityName = tostring(rarityData.DisplayName or rarityData._id or assetData.Rarity or "Common")
-                local rarityRank = tonumber(rarityData.RarityNumber or rarityData.Rank or assetData.Rank) or (MasterRegistry.RarityRanks and MasterRegistry.RarityRanks[rarityName]) or 1
+                    local displayName = tostring(assetData.DisplayName or cat)
+                    local rarityData = (type(assetData.Rarity) == "table" and assetData.Rarity) or {}
+                    local rarityName = tostring(rarityData.DisplayName or rarityData._id or assetData.Rarity or "Common")
+                    local rarityRank = tonumber(rarityData.RarityNumber or rarityData.Rank or assetData.Rank) or (MasterRegistry.RarityRanks and MasterRegistry.RarityRanks[rarityName]) or 1
 
-                local scale = tonumber(record.AssetScale) or 1
-                local scaleFactor = (scale > 5) and (((scale / 5) ^ 1.2) * 19.637875755794113) or (scale ^ 1.85)
+                    local scale = tonumber(record.AssetScale) or 1
+                    local scaleFactor = (scale > 5) and (((scale / 5) ^ 1.2) * 19.637875755794113) or (scale ^ 1.85)
 
-                local mutationMultiplier = 1
-                if mutationsMod and typeof(mutationsMod.EarningsFor) == "function" and type(record.Mutations) == "table" then
-                    local ok, mul = pcall(mutationsMod.EarningsFor, record.Mutations)
-                    if ok and type(mul) == "number" and mul > 0 then
-                        mutationMultiplier = mul
+                    local mutationMultiplier = 1
+                    if mutationsMod and typeof(mutationsMod.EarningsFor) == "function" and type(record.Mutations) == "table" then
+                        local ok, mul = pcall(mutationsMod.EarningsFor, record.Mutations)
+                        if ok and type(mul) == "number" and mul > 0 then
+                            mutationMultiplier = mul
+                        end
+                    elseif record.Mutations and #record.Mutations > 0 then
+                        mutationMultiplier = 2.5
                     end
-                elseif record.Mutations and #record.Mutations > 0 then
-                    mutationMultiplier = 2.5
+
+                    local baseRate = tonumber(assetData.EarningRate) or 0
+                    local valuePerSec = baseRate * scaleFactor * mutationMultiplier
+
+                    local iconId = tostring(assetData.Icon or assetData.Thumbnail or "")
+                    if iconId ~= "" and tonumber(iconId) then iconId = "rbxassetid://" .. iconId end
+
+                    table.insert(eggItems, {
+                        Uid = uid,
+                        Name = displayName,
+                        Area = tostring(record.AreaId or "Unknown"),
+                        Scale = scale,
+                        Rarity = rarityName,
+                        Rank = rarityRank,
+                        Value = valuePerSec,
+                        Icon = iconId,
+                        Record = record
+                    })
                 end
-
-                local baseRate = tonumber(assetData.EarningRate) or 0
-                local valuePerSec = baseRate * scaleFactor * mutationMultiplier
-
-                local iconId = tostring(assetData.Icon or assetData.Thumbnail or "")
-                if iconId ~= "" and tonumber(iconId) then iconId = "rbxassetid://" .. iconId end
-
-                table.insert(eggItems, {
-                    Uid = uid,
-                    Name = displayName,
-                    Area = tostring(record.AreaId or "Unknown"),
-                    Scale = scale,
-                    Rarity = rarityName,
-                    Rank = rarityRank,
-                    Value = valuePerSec,
-                    Icon = iconId,
-                    Record = record
-                })
             end
         end
     end
 
-    return eggItems
+    if #eggItems > 0 then
+        State.cachedStealPanelItems = eggItems
+    end
+
+    return (#eggItems > 0 and eggItems) or State.cachedStealPanelItems or {}
 end
 
 local StealPanelTab, renderStealPanel = Window:CreateStealPanelTab("Steal Panel", "Steal Panel", {
