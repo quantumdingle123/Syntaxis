@@ -752,6 +752,31 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 
 ---
 
+### 6.19 Steal Panel Resilient Data Pipeline & Auto UFO Physics Stabilization (hot.lua reference)
+- **1. Steal Panel Restoration (`hot.lua` lines 80–135 & 7336–7372):**
+  - **Executor Thread Identity 8 Elevation:** In Roblox client executors, requiring `ReplicatedStorage.Client.EggState` or calling `EggState.ReadFieldEggs()` requires thread identity 8. Integrated `setthreadidentity(8)` / `set_thread_identity(8)` elevation directly into module require and method invocation matching `hot.lua` (`line 7346`).
+  - **Centralized `GameModules` Loader:** Traverses dot-paths (`Client.EggState`, `Data.Assets`, `Shared.Modules.Mutations`, etc.) with `WaitForChild(part, 3)` safety fallbacks, eliminating timing-based replication misses when games load.
+  - **Multi-Path Field Egg Resolution:**
+    1. *Path 1 (Client EggState):* Calls `EggState.ReadFieldEggs()` with identity 8. Checks both `res.Records` and raw dictionary `res`.
+    2. *Path 2 (Network Snapshot Fallback):* Invokes `RF/EggWorld/AskFieldEggSnapshot` if client state is nil or empty.
+    3. *Path 3 (Persistent Cache Fallback):* Saves records into `State.cachedFieldEggs` and falls back to cached eggs if live calls momentarily return empty, preventing blank panel flickers.
+  - **Inclusive State Filtering:** Expanded state check to include `"Slot"`, `"Dropped"`, `"Carried"`, `"Placed"`, and `nil` (matching `hot.lua` line 7755).
+  - **Dynamic Metadata & Exact Math:** Maps `AssetCategory` via `GameModules:Get("Assets").Directory`, calculating true value with `Mutations.EarningsFor(record.Mutations)` and `EggRecords.WeightKgForScale`.
+  - **Background Refresh Loop:** Cleaned conditional gating to refresh every 1.5s whenever `StealPanelTab.Page.Visible` is true without `State.isOpn` blocking.
+
+- **2. Auto UFO Physics & Anti-Tweaking Stabilization (`hot.lua` lines 20295–20330 & 20735):**
+  - **Strict Server Event Gating (`st.Available == true`):** In `UFOManager:HasWork()`, added strict server event gating. If `st.Available` is false or nil, `HasWork()` immediately returns `nil`. Completely eliminates false `"repair"` states and random teleportation to `UFOSightingsCamp` when no UFO event is active.
+  - **Secondary Guard Gates:** Returns `nil` if `st.SpeedLocked`, `st.Tutorial`, `State.isStealingActive`, `isHoldingEgg()`, or `isMapClosed()`.
+  - **Preserved Y-Gravity in Decode Mode (No Floating!):** In `decode` mode, replaced `AssemblyLinearVelocity = Vector3.new(dir * speed, 0, 0)` with `Vector3.new(targetVelX, root.AssemblyLinearVelocity.Y, math.clamp((-365 - root.Position.Z) * 5, -50, 50))`. Preserving `AssemblyLinearVelocity.Y` allows Roblox gravity to pull down naturally (eliminating mid-air floating), while actively steering the character along the runway at $Z = -365$ matching `hot.lua` line 20735.
+  - **Action Failure Debounce:** On failed `repair` or `trade`, sets `self.State.no = os.clock() + 60` (matching `hot.lua` line 21045), preventing tight-loop retries.
+  - **Smooth Rock Approach:** Replaced sequential multi-CFrame teleports with distance-checked smooth approach ($> 20$ studs) before firing `RE/UFOSightings/CollectRock`.
+  - **Hold State Implementation:** Added clean `hold` state that zeroes horizontal velocity and yields while tractor beam egg delivery is active.
+
+- **3. Normal Dimension Steal Preservation:**
+  - All core Auto Steal functions (`executeFastStealOutbound`, `executeFastStealDelivery`, `executeCheckpointedHopsHome`, boundary checkpoint $X = 600.2$, 45-stud micro-hops) remain **100% byte-for-byte preserved**.
+
+---
+
 ## 9. Commit History & Version Milestones
 
 | Commit SHA | Commit Title / Name | Description |
@@ -796,3 +821,4 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `1db44d97e1a82148e0d3259eadf8a19e1f512efd` | `fix(combat): eliminate inventory tool leakage & arm flapping in bat switching via hot.lua engine` | Centralized `isCombatWeapon` engine with strict non-weapon exclusions, multi-weapon keyword whitelist, attribute checks, eliminated `#weapons == 0` inventory dump, eliminated single-bat arm flapping, and integrated cooldown-aware switching across `HalloweenCombatManager` and `HalloweenBossManager`. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `fe9aa6c3f6ed1ce0cdfbc500b28ee35b632f55a2` | `feat(cleanup): complete removal of Halloween Event 2026 modules, managers, workers & GUI categories` | Cleaned 4,710 lines of Halloween code: purged 9 seasonal managers, 7 background workers, dimension supervisors, and GUI controls. Streamlined `PriorityManager` to 3 core tasks. Reduced script footprint by >60% (297 KB -> 113 KB). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 | `d9d2fa385f1486799798c7eaccacf7cc43351d8c` | `feat(ufo-bloom-steal): implement UFO event suite, dual-path steal panel & anti-cheat safe bloom` | Full UFO Event suite (state machine, bitmask pipe puzzle solver, signal decoder, rare mothership interior & vault, tractor beam egg delivery & debris trading); Steal Panel dual-path snapshot pipeline & asset directory metadata lookup; anti-cheat safe Bloom/Enchanted overhaul (event-driven remote tracking, ground raycasting, Stand/Chase modes, prompt tree transit & smart trade math). Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
+| `b9c304d6344cb339d842f95c1fda24662a4ef26d` | `fix(steal-ufo): restore steal panel via GameModules loader & fix UFO event physics & availability gating` | Fixed Steal Panel blank display via GameModules dot-path traversal loader, elevated thread identity 8, multi-path resolution (Client EggState -> RF snapshot -> persistent cache), Carried state support & asset directory lookup; fixed Auto UFO tweaking/teleporting/floating via strict st.Available event gating, Y-gravity preservation in decode mode, runway Z-alignment (-365), 60s failure backoff & smooth rock approach. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
