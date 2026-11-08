@@ -874,6 +874,9 @@ Tasks are evaluated strictly in canonical order (default order, user-reorderable
 | `54bd8f577ca632cd0165f89b0e5a95c7284b7c20` | `fix(wisp): stabilize auto wisp quest with hot.lua event gating, outdoor anchor & smooth stepping` | Precondition gating (50B speed power & forest reveal), eliminated blind Claim remote spam, outdoor WispAnchor return, smooth waypoint stepping (StepTowards), fusery automation & 100% normal steal preservation. |
 | `b9c304d6344cb339d842f95c1fda24662a4ef26d` | `fix(steal-ufo): restore steal panel via GameModules loader & fix UFO event physics & availability gating` | Fixed Steal Panel blank display via GameModules dot-path traversal loader, elevated thread identity 8, multi-path resolution (Client EggState -> RF snapshot -> persistent cache), Carried state support & asset directory lookup; fixed Auto UFO tweaking/teleporting/floating via strict st.Available event gating, Y-gravity preservation in decode mode, runway Z-alignment (-365), 60s failure backoff & smooth rock approach. Preserved Normal Dimension Auto Steal 100% byte-for-byte intact. |
 
+| `dea409bf106a7bb7fe4c765edd7e686c2423da38` | `fix(gui): restore corrupted module closures & implement PC mouse dragging` | Cleaned module closures in SyntaxisLib; fixed PC mouse drag cancellation via screen-wide UserInputService tracking and raycast hit-testing. |
+| `9d96f296eb6cead98c52993a57323bfb4138e934` | `feat(gui): default topbar search bar & anti-cheat camouflage (v2.2.0)` | Added default Search Bar in Window topbar with real-time card filtering & category auto-expansion; added automatic component indexing; added anti-cheat camouflage with randomized instance names & syn.protect_gui / protectgui. |
+
 
 ### 6.22 Luau Capability Security & Thread Identity Isolation Architecture (Commit `c529337605c583a7436fed57aabc67ac92acacb8` & GUILib `ddfd7c79122f9bd446e940df9f6e261dfc68c19d`)
 
@@ -915,3 +918,18 @@ Investigation revealed why only **Auto Trade Debris** functioned while all other
 - **Smooth Navigation for Rocks & Rare UFO:** Added distance-checked glide traversal within 20 studs for debris collection, safe boarding at -85 studs, keypad code validation, alien staff claims, and instant `LeaveUFO` prompt firing.
 - **Connected `ufoTp` Teleportation:** Linked `getgenv().config.ufoTp` to fast travel portal outbound routing whenever UFO target egg distance >= 1000 studs.
 - **100% Preservation:** Preserved Auto Trade Debris (`RF/UFOSightings/Trade`) and normal dimension egg stealing untouched.
+
+
+### 6.23 Default Search Bar & Anti-Cheat Camouflage Engine (v2.2.0, Commit `9d96f29`)
+
+#### 1. Default Header Search Bar Architecture
+- **Location & Display:** Integrated directly into the top bar (`UDim2.new(1, -12, 0.5, 0)`, width 154px) on every window by default (`config.SearchBar ~= false`), requiring zero extra setup code from consumers.
+- **Automatic Real-Time Indexing:** Every component (`CreateToggle`, `CreateSlider`, `CreateDropdown`, `CreateMultiDropdown`, `CreateButton`, `CreateKeybind`, `CreateTextbox`, `CreateLabel`) registers its title, description, and root card frame into `ctx.SearchIndex` upon instantiation.
+- **Smart Filtering & Category Expansion:** Typing in the search input evaluates titles and descriptions in lowercase substring match. Matching cards remain visible while non-matching cards hide. Categories containing matching cards automatically expand (`cat:SetOpen(true)`). If the category title itself matches the search query, all items in that category are shown.
+- **Smart Tab Navigation:** If the active tab contains no search matches, the engine automatically switches to the first tab containing relevant results.
+- **Opt-Out & Reset:** Pressing the clear button (`✕`) or calling `Window:ClearSearch()` restores all component cards and category open states. Developers can disable the search bar entirely by passing `SearchBar = false` in `CreateWindow`.
+
+#### 2. Anti-Cheat Camouflage Architecture
+- **Anonymous Instance Name:** Unless `config.GuiName` is explicitly specified, the library generates a randomized GUID name (`G_<hex>`) instead of predictable names like `SyntaxHubGUI`, preventing game anti-cheat scripts from locating the GUI via `FindFirstChild`.
+- **Instance Tagging:** The `ScreenGui` is tagged with `mainUI:SetAttribute("SyntaxisInstance", true)`, allowing the library to reliably identify and clean up old GUI instances upon re-execution regardless of name randomization.
+- **Protection Polyfill:** Integrates `syn.protect_gui(mainUI)` and `protectgui(mainUI)` wrapped in safe `pcall` blocks to camouflage the GUI from `PlayerGui:GetChildren()` scans.
