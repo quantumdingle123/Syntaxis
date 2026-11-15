@@ -3738,7 +3738,19 @@ local SyntaxisLib = loadstring(game:HttpGet("https://raw.githubusercontent.com/q
 
 Window = SyntaxisLib:CreateWindow({
     Title = "Syntaxis",
+    GameName = "Steal An Egg",
     GuiName = "SyntaxHubGUI",
+    ShowLoader = true,
+    LoaderLayout = "B",
+    LoaderDuration = 3.2,
+    LoaderBlur = true,
+    LoaderSteps = {
+        { Threshold = 0.22, Step = "01 / 05", Text = "Loading Steal An Egg modules..." },
+        { Threshold = 0.48, Step = "02 / 05", Text = "Syncing conveyor egg registry..." },
+        { Threshold = 0.72, Step = "03 / 05", Text = "Initializing farm & event workers..." },
+        { Threshold = 0.88, Step = "04 / 05", Text = "Applying Liquid Glass theme..." },
+        { Threshold = 1.00, Step = "05 / 05", Text = "Ready to steal eggs!" }
+    },
     Theme = currentSettings.Theme or "Sapphire",
     Transparency = currentSettings.Transparency or 0,
     State = State,
@@ -4084,9 +4096,12 @@ local SettingsTab = Window:CreateSettingsTab("Settings", "Settings", {
 
 -- Background Refresh for Steal Panel (every 1.5s while panel is visible)
 task.spawn(function()
-    while true do
+    while Window and Window.Context and Window.Context.IsAlive do
         task.wait(1.5)
-        if StealPanelTab.Page and StealPanelTab.Page.Visible and not State.isStealingActive and renderStealPanel then
+        if not (Window and Window.Context and Window.Context.IsAlive) then
+            break
+        end
+        if StealPanelTab.Page and StealPanelTab.Page.Visible and (not Window.MainFrame or Window.MainFrame.Visible) and not State.isStealingActive and renderStealPanel then
             pcall(renderStealPanel)
         end
     end
@@ -4095,8 +4110,22 @@ end)
 -- Initialize Window
 Window:Initialize()
 
--- Show Community Discord Popup upon initial launch
-task.defer(function()
-    task.wait(0.5)
-    Window:ShowDiscordModal()
-end)
+-- Show Community Discord Popup after initial launch / loader completes
+local function showStartupDiscordModal()
+    task.delay(0.15, function()
+        if Window and Window.Context and Window.Context.IsAlive then
+            Window:ShowDiscordModal()
+        end
+    end)
+end
+
+if Window._ActiveLoader and typeof(Window._ActiveLoader.OnComplete) == "function" then
+    Window._ActiveLoader:OnComplete(showStartupDiscordModal)
+else
+    task.defer(function()
+        task.wait(0.5)
+        if Window and Window.Context and Window.Context.IsAlive then
+            Window:ShowDiscordModal()
+        end
+    end)
+end
