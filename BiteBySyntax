@@ -144,9 +144,41 @@ local currentSettings = {
     }
 }
 
+local _errReportTimes = {}
+local _errReportCount = 0
+
+local function reportError(tag, err)
+    if not err then return end
+    local msg = tostring(err)
+    local key = tostring(tag) .. "|" .. msg
+    local now = os.clock()
+    local last = _errReportTimes[key]
+    if last and (now - last) < 10 then
+        return
+    end
+    if not last then
+        _errReportCount = _errReportCount + 1
+        if _errReportCount > 80 then
+            table.clear(_errReportTimes)
+            _errReportCount = 1
+        end
+    end
+    _errReportTimes[key] = now
+    warn(string.format("[Syntaxis Error][%s] %s", tostring(tag), msg))
+end
+
+local function safeCall(tag, fn, ...)
+    local ok, r1, r2, r3 = pcall(fn, ...)
+    if not ok then
+        reportError(tag, r1)
+        return false, r1
+    end
+    return true, r1, r2, r3
+end
+
 local function saveStuff()
     if writefile then
-        pcall(function()
+        safeCall("Config.Save", function()
             writefile(saveFile, Services.HttpService:JSONEncode(currentSettings))
         end)
     end
@@ -154,7 +186,7 @@ end
 
 local function loadStuff()
     if isfile and readfile and isfile(saveFile) then
-        pcall(function()
+        safeCall("Config.Load", function()
             local decoded = Services.HttpService:JSONDecode(readfile(saveFile))
             if decoded and type(decoded) == "table" then
                 for k, v in pairs(decoded) do
@@ -381,19 +413,21 @@ local Remotes = {
 local function invokeRemote(pathName, ...)
     local remote = getRemote(pathName)
     if remote and remote:IsA("RemoteFunction") then
-        local ok, r1, r2, r3 = pcall(function(...) return remote:InvokeServer(...) end, ...)
+        local ok, r1, r2, r3 = safeCall("InvokeRemote:" .. tostring(pathName), remote.InvokeServer, remote, ...)
         if ok then return true, r1, r2, r3 end
         return false, r1
     end
-    return false, "RemoteFunction not found: " .. tostring(pathName)
+    local msg = "RemoteFunction not found: " .. tostring(pathName)
+    reportError("Remote:" .. tostring(pathName), msg)
+    return false, msg
 end
 
 local function fireRemote(pathName, ...)
     local remote = getRemote(pathName)
     if remote and remote:IsA("RemoteEvent") then
-        pcall(function(...) remote:FireServer(...) end, ...)
-        return true
+        return (safeCall("FireRemote:" .. tostring(pathName), remote.FireServer, remote, ...))
     end
+    reportError("Remote:" .. tostring(pathName), "RemoteEvent not found: " .. tostring(pathName))
     return false
 end
 
@@ -429,7 +463,9 @@ function GameModules:Get(name)
         if setid then pcall(setid, 8) end
         local ok, mod = pcall(require, current)
         if setid and oldId then pcall(setid, oldId) end
-        if ok and type(mod) == "table" then
+        if not ok then
+            reportError("Module:" .. tostring(name), mod)
+        elseif type(mod) == "table" then
             _moduleCache[name] = mod
             return mod
         end
@@ -453,7 +489,9 @@ local function getFieldEggRecords()
         if setid then pcall(setid, 8) end
         local ok, data = pcall(es.ReadFieldEggs)
         if setid and oldId then pcall(setid, oldId) end
-        if ok and type(data) == "table" and type(data.Records) == "table" and next(data.Records) ~= nil then
+        if not ok then
+            reportError("EggState.ReadFieldEggs", data)
+        elseif type(data) == "table" and type(data.Records) == "table" and next(data.Records) ~= nil then
             State.cachedFieldEggs = data.Records
             return data.Records
         end
@@ -462,7 +500,7 @@ local function getFieldEggRecords()
     -- Path 2: Network Snapshot Fallback (RF/EggWorld/AskFieldEggSnapshot)
     local snapshotRemote = getRemote("RF/EggWorld/AskFieldEggSnapshot") or (Remotes and Remotes.AskSnapshot)
     if snapshotRemote and snapshotRemote:IsA("RemoteFunction") then
-        local ok, data = pcall(function() return snapshotRemote:InvokeServer() end)
+        local ok, data = safeCall("Snapshot.AskFieldEgg", snapshotRemote.InvokeServer, snapshotRemote)
         if ok and type(data) == "table" and type(data.Records) == "table" and next(data.Records) ~= nil then
             State.cachedFieldEggs = data.Records
             return data.Records
@@ -477,7 +515,7 @@ local function getFieldEggRecords()
     return {}
 end
 
-pcall(function()
+safeCall("RigSync.Listener", function()
     local packages = Services.ReplicatedStorage:WaitForChild("Packages", 5)
     local networking = packages and packages:WaitForChild("Networking", 5)
     local refreshRemote = networking and networking:FindFirstChild("RE/RigSync/Refresh")
@@ -1044,10 +1082,10 @@ end
 
 local function dropHeldEggDirect()
     if EggState and typeof(EggState.DropFieldEgg) == "function" then
-        pcall(function() EggState.DropFieldEgg("PlayerRequest") end)
+        safeCall("EggState.DropFieldEgg", EggState.DropFieldEgg, "PlayerRequest")
     end
     if Remotes.AskFieldEggDrop then
-        pcall(function() Remotes.AskFieldEggDrop:InvokeServer({ Reason = "PlayerRequest" }) end)
+        safeCall("Remote:AskFieldEggDrop", Remotes.AskFieldEggDrop.InvokeServer, Remotes.AskFieldEggDrop, { Reason = "PlayerRequest" })
     end
 end
 
@@ -1215,16 +1253,16 @@ function BloomManager:EnsureNetEquipped()
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if tool and char and hum then
         if tool.Parent ~= char then
-            pcall(function() hum:EquipTool(tool) end)
+            safeCall("Bloom.EquipNet", hum.EquipTool, hum, tool)
         end
         return tool
     end
     if Remotes.ClaimNet then
-        pcall(function() Remotes.ClaimNet:InvokeServer() end)
+        safeCall("Remote:ClaimNet", Remotes.ClaimNet.InvokeServer, Remotes.ClaimNet)
         task.wait(0.2)
         local claimed = self:GetButterflyNet()
         if claimed and char and hum and claimed.Parent ~= char then
-            pcall(function() hum:EquipTool(claimed) end)
+            safeCall("Bloom.EquipClaimedNet", hum.EquipTool, hum, claimed)
         end
         return claimed
     end
@@ -1353,7 +1391,7 @@ function BloomManager:HandleFusery(quest)
     local finishRevealRemote = getRemote("RF/Fusery/FinishReveal")
     if save.FusionLocked then
         if type(save.FusionEggReward) == "table" and finishRevealRemote then
-            pcall(function() finishRevealRemote:InvokeServer() end)
+            safeCall("Fusery.FinishReveal", finishRevealRemote.InvokeServer, finishRevealRemote)
         end
         return
     end
@@ -1364,7 +1402,7 @@ function BloomManager:HandleFusery(quest)
     if areaConfigs and areaId then
         local cfgMod = areaConfigs:FindFirstChild(tostring(areaId))
         if cfgMod and cfgMod:IsA("ModuleScript") then
-            local ok, cfg = pcall(require, cfgMod)
+            local ok, cfg = safeCall("Fusery.RequireAreaConfig", require, cfgMod)
             if ok and cfg and type(cfg.DropTable) == "table" then
                 for _, row in ipairs(cfg.DropTable) do
                     local cat = row[1] or row.Category
@@ -1401,25 +1439,25 @@ function BloomManager:HandleFusery(quest)
             if readyMap[slotPet] then
                 loadedMap[slotPet] = true
             elseif ejectRemote then
-                pcall(function() ejectRemote:InvokeServer(slotPet) end)
+                safeCall("Fusery.EjectPet", ejectRemote.InvokeServer, ejectRemote, slotPet)
                 task.wait(0.2)
             end
         end
 
         if save.FusionInfoAcknowledged == false and briefingRemote then
-            pcall(function() briefingRemote:InvokeServer() end)
+            safeCall("Fusery.ConfirmBriefing", briefingRemote.InvokeServer, briefingRemote)
             task.wait(0.2)
         end
 
         for _, pUid in ipairs(readyPets) do
             if not loadedMap[pUid] and loadRemote then
-                pcall(function() loadRemote:InvokeServer(pUid) end)
+                safeCall("Fusery.LoadPet", loadRemote.InvokeServer, loadRemote, pUid)
                 task.wait(0.2)
             end
         end
 
         if fuseRemote then
-            pcall(function() fuseRemote:InvokeServer() end)
+            safeCall("Fusery.BeginFuse", fuseRemote.InvokeServer, fuseRemote)
             task.wait(0.3)
         end
     end
@@ -1509,7 +1547,7 @@ function BloomManager:ProcessWisp()
 
         if self:StepTowards(spawnPos, 12.0) then
             task.wait(0.5)
-            local ok = pcall(function() remote:InvokeServer("Accept") end)
+            local ok = safeCall("Wisp.Accept", remote.InvokeServer, remote, "Accept")
             if ok then
                 self.LastWispAction = os.clock()
             else
@@ -1531,7 +1569,7 @@ function BloomManager:ProcessWisp()
         local target = tonumber(quest.Target) or 1
 
         if not isClaimed and progress >= target then
-            local ok = pcall(function() remote:InvokeServer("Claim", quest.Id) end)
+            local ok = safeCall("Wisp.Claim", remote.InvokeServer, remote, "Claim", quest.Id)
             if ok then
                 self.LastWispAction = os.clock()
             else
@@ -1544,7 +1582,7 @@ function BloomManager:ProcessWisp()
     -- 3. All Stages Complete -> Return Wisp to Outdoor WispAnchor
     if stage >= stageCount then
         if not wispComp.Returning then
-            pcall(function() remote:InvokeServer("BeginReturn") end)
+            safeCall("Wisp.BeginReturn", remote.InvokeServer, remote, "BeginReturn")
             task.wait(0.3)
         end
 
@@ -1556,7 +1594,7 @@ function BloomManager:ProcessWisp()
 
         if self:StepTowards(anchorPos, 12.0) then
             task.wait(0.5)
-            local ok = pcall(function() remote:InvokeServer("Return") end)
+            local ok = safeCall("Wisp.Return", remote.InvokeServer, remote, "Return")
             if ok then
                 self.LastWispAction = os.clock()
             else
@@ -1721,14 +1759,14 @@ function BloomManager:Process()
                     for _, tier in ipairs(self.TradeTiers) do
                         local req = self.CostMap[tier] or 10
                         if (counts[tier] or 0) >= req then
-                            pcall(function() tradeRemote:InvokeServer("ButterflyMachine", tier) end)
+                            safeCall("Bloom.TradeUp", tradeRemote.InvokeServer, tradeRemote, "ButterflyMachine", tier)
                             task.wait(0.2)
                         end
                     end
                 end
 
                 if getgenv().config.autoCraftEssence and craftRemote then
-                    pcall(function() craftRemote:InvokeServer("MutationShrine") end)
+                    safeCall("Bloom.CraftEssence", craftRemote.InvokeServer, craftRemote, "MutationShrine")
                     task.wait(0.2)
                 end
 
@@ -1762,7 +1800,7 @@ UFOManager = {
     }
 }
 
-pcall(function()
+safeCall("UFOManager.Listener", function()
     local reState = getRemote("RE/UFOSightings/State")
     if reState and reState:IsA("RemoteEvent") then
         reState.OnClientEvent:Connect(function(st)
@@ -1780,7 +1818,7 @@ end)
 function UFOManager:FetchState()
     local fetchRemote = getRemote("RF/UFOSightings/Fetch")
     if fetchRemote and fetchRemote:IsA("RemoteFunction") then
-        local ok, st = pcall(function() return fetchRemote:InvokeServer() end)
+        local ok, st = safeCall("UFOManager.FetchState", fetchRemote.InvokeServer, fetchRemote)
         if ok and type(st) == "table" then
             self.State.st = st
             self.State.sus = {}
@@ -1810,7 +1848,7 @@ end
 
 task.spawn(function()
     task.wait(1.0)
-    pcall(function() UFOManager:FetchState() end)
+    safeCall("UFOManager.StartupFetch", UFOManager.FetchState, UFOManager)
 end)
 
 function UFOManager:RotateMask(mask, steps)
@@ -1823,7 +1861,7 @@ end
 function UFOManager:SolvePipePuzzle(seed)
     local puzzleMod = Services.ReplicatedStorage:FindFirstChild("Shared") and Services.ReplicatedStorage.Shared:FindFirstChild("Modules") and Services.ReplicatedStorage.Shared.Modules:FindFirstChild("UFOSightingsPipePuzzle")
     if not puzzleMod then return nil end
-    local ok, puzzleLib = pcall(require, puzzleMod)
+    local ok, puzzleLib = safeCall("UFOManager.PipePuzzleRequire", require, puzzleMod)
     if not ok or not puzzleLib or typeof(puzzleLib.Generate) ~= "function" then return nil end
 
     local grid = puzzleLib.Generate(seed)
@@ -2109,7 +2147,7 @@ function UFOManager:Process()
                     local intRocks = self.State.st.Rocks
                     if intRocks and intRocks.List then
                         for _, r in ipairs(intRocks.List) do
-                            pcall(function() fireRemote("RE/UFOSightings/CollectRock", intRocks.Id, r.Index) end)
+                            fireRemote("RE/UFOSightings/CollectRock", intRocks.Id, r.Index)
                         end
                     end
 
@@ -2187,7 +2225,7 @@ function UFOManager:Process()
                         root.AssemblyLinearVelocity = Vector3.zero
                         task.wait(0.08)
                     end
-                    pcall(function() fireRemote("RE/UFOSightings/CollectRock", rocks.Id, rock.Index) end)
+                    fireRemote("RE/UFOSightings/CollectRock", rocks.Id, rock.Index)
                     task.wait(0.12)
                 end
             end
@@ -2207,10 +2245,12 @@ function UFOManager:Process()
             root.AssemblyLinearVelocity = Vector3.zero
             task.wait(0.2)
             while (self.State.st.SpaceRocks or 0) >= (self.State.st.RockCost or math.huge) do
-                local ok, traded = pcall(function() return invokeRemote("RF/UFOSightings/Trade", self.State.st.RockCost) end)
-                if not ok or not traded then break end
+                local prevRocks = self.State.st.SpaceRocks or 0
+                local ok, traded = invokeRemote("RF/UFOSightings/Trade", self.State.st.RockCost)
+                if not ok or traded == false then break end
                 tradeSuccess = true
                 self:FetchState()
+                if (self.State.st.SpaceRocks or 0) >= prevRocks then break end
                 task.wait(0.3)
             end
         end
@@ -2534,6 +2574,7 @@ function WorkerScheduler:Start()
                         t.Running = false
                         if not ok and err then
                             t.Hold = 3
+                            reportError("Worker:" .. tostring(t.Name), err)
                         end
                     end)
                 end
@@ -2557,17 +2598,17 @@ local function tryUpgradeTreadmill()
     local treadmillsModule = dataFolder and dataFolder:FindFirstChild("Treadmills")
     if not treadmillsModule then return end
 
-    local ok, tData = pcall(require, treadmillsModule)
+    local ok, tData = safeCall("Upgrades.RequireTreadmills", require, treadmillsModule)
     if not ok or type(tData) ~= "table" then return end
 
     local currentLevel = tonumber(save and save.TreadmillUpgradeLevel) or 0
     if type(tData.GetByUpgradeLevel) == "function" then
-        local okNext, nextTier = pcall(tData.GetByUpgradeLevel, currentLevel + 1)
+        local okNext, nextTier = safeCall("Upgrades.TreadmillTierLookup", tData.GetByUpgradeLevel, currentLevel + 1)
         if okNext and type(nextTier) == "table" then
             local nextId = nextTier._id
             local price = tonumber(nextTier.Price) or math.huge
             if type(nextId) == "string" and myMoney >= price then
-                pcall(function() Remotes.TierRaise:InvokeServer(nextId) end)
+                safeCall("Upgrades.TreadmillTierRaise", Remotes.TierRaise.InvokeServer, Remotes.TierRaise, nextId)
                 return
             end
         end
@@ -2581,7 +2622,7 @@ local function tryUpgradeTreadmill()
         table.sort(sorted, function(a, b) return a.Price < b.Price end)
         for _, item in ipairs(sorted) do
             if item.Level > currentLevel and myMoney >= item.Price then
-                pcall(function() Remotes.TierRaise:InvokeServer(item.Name) end)
+                safeCall("Upgrades.TreadmillTierRaiseDir", Remotes.TierRaise.InvokeServer, Remotes.TierRaise, item.Name)
                 break
             end
         end
@@ -2596,7 +2637,7 @@ local function tryUpgradeBase()
     local basesModule = dataFolder and dataFolder:FindFirstChild("Bases")
     if not basesModule then return end
 
-    local ok, bData = pcall(require, basesModule)
+    local ok, bData = safeCall("Upgrades.RequireBases", require, basesModule)
     if not ok or type(bData) ~= "table" or type(bData.BASES) ~= "table" then return end
 
     local save = getSaveData()
@@ -2610,7 +2651,7 @@ local function tryUpgradeBase()
     local myMoney = math.max(getPlayerMoney(), tonumber(save and save.Money) or 0)
 
     if cost and myMoney >= cost then
-        pcall(function() Remotes.BaseTierRaise:FireServer() end)
+        safeCall("Upgrades.BaseTierRaise", Remotes.BaseTierRaise.FireServer, Remotes.BaseTierRaise)
     end
 end
 
@@ -2990,10 +3031,10 @@ local function instantGrabAtPosition(uid, targetPos, sessionId, isNest)
         if os.clock() >= nextRemoteDispatch then
             nextRemoteDispatch = os.clock() + 0.3
             if Remotes.AskFieldEggCarry and uid then
-                task.spawn(function() pcall(function() Remotes.AskFieldEggCarry:InvokeServer({ Uid = uid }) end) end)
+                task.spawn(function() safeCall("Remote:AskFieldEggCarry", Remotes.AskFieldEggCarry.InvokeServer, Remotes.AskFieldEggCarry, { Uid = uid }) end)
             end
             if typeof(EggState.CarryFieldEgg) == "function" and uid then
-                pcall(function() EggState.CarryFieldEgg(uid) end)
+                safeCall("EggState.CarryFieldEgg", EggState.CarryFieldEgg, uid)
             end
         end
 
@@ -3036,7 +3077,7 @@ local function performGroundCheckpoint(targetEgg, currentX, laneZ, sessionId)
 
     -- Regrab: try client EggState.CarryFieldEgg first, then physical grab
     if uid and EggState and typeof(EggState.CarryFieldEgg) == "function" then
-        pcall(function() EggState.CarryFieldEgg(uid) end)
+        safeCall("EggState.RegrabCarry", EggState.CarryFieldEgg, uid)
         task.wait(0.12)
     end
 
@@ -3575,11 +3616,12 @@ WorkerScheduler:Register("UFOEvent", 0.25, function()
 
     UFOManager.tick = (UFOManager.tick or 0) + 1
     if (UFOManager.tick % 40) == 1 then
-        pcall(function() UFOManager:FetchState() end)
+        safeCall("UFOManager.FetchState", UFOManager.FetchState, UFOManager)
     end
 
     if PriorityManager:Acquire("UFO", 25.0) then
-        pcall(function() UFOManager:Process() end)
+        safeCall("UFOManager.Process", UFOManager.Process, UFOManager)
+        UFOManager.IsBusy = false
         PriorityManager:Release("UFO")
     end
 end)
@@ -3589,7 +3631,8 @@ WorkerScheduler:Register("EventsCombat", 0.35, function()
     if not PriorityManager:CanRun("Bloom") then return end
 
     if PriorityManager:Acquire("Bloom", 15.0) then
-        pcall(function() BloomManager:Process() end)
+        safeCall("BloomManager.Process", BloomManager.Process, BloomManager)
+        BloomManager.IsBusy = false
         PriorityManager:Release("Bloom")
     end
 end)
@@ -3772,7 +3815,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                         postHum.Sit = false
                     end
                     if Remotes.AskWearStill and not isStealBusy and PriorityManager:CanRun("Treadmill") then
-                        pcall(function() Remotes.AskWearStill:InvokeServer() end)
+                        safeCall("Treadmill.WearStill", Remotes.AskWearStill.InvokeServer, Remotes.AskWearStill)
                     end
                     task.wait(0.35)
                     local _, verifyRoot = getAliveRig()
@@ -3781,7 +3824,7 @@ WorkerScheduler:Register("StealAndTreadmill", 0.25, function()
                         if State.treadmillFailCount >= 8 then
                             resetFlaggedCharacter()
                         elseif State.treadmillFailCount == 4 and Remotes.AskDoff then
-                            pcall(function() Remotes.AskDoff:InvokeServer() end)
+                            safeCall("Treadmill.Doff", Remotes.AskDoff.InvokeServer, Remotes.AskDoff)
                         end
                     else
                         State.treadmillFailCount = 0
@@ -3913,7 +3956,7 @@ ufoCategory:CreateToggle("Auto UFO", "Automate decoding, tractor beam delivery &
     currentSettings.AutoUFO = state
     saveStuff()
     if state and UFOManager and UFOManager.FetchState then
-        pcall(function() UFOManager:FetchState() end)
+        safeCall("UI.AutoUFO.FetchState", UFOManager.FetchState, UFOManager)
     end
 end)
 
@@ -3922,7 +3965,7 @@ ufoCategory:CreateToggle("Collect UFO Debris", "Collect space rocks across the w
     currentSettings.UFORocks = state
     saveStuff()
     if state and UFOManager and UFOManager.FetchState then
-        pcall(function() UFOManager:FetchState() end)
+        safeCall("UI.UFORocks.FetchState", UFOManager.FetchState, UFOManager)
     end
 end)
 
@@ -3931,7 +3974,7 @@ ufoCategory:CreateToggle("Farm Rare UFO", "Board mothership, smash capsules, vau
     currentSettings.UFORare = state
     saveStuff()
     if state and UFOManager and UFOManager.FetchState then
-        pcall(function() UFOManager:FetchState() end)
+        safeCall("UI.UFORare.FetchState", UFOManager.FetchState, UFOManager)
     end
 end)
 
@@ -3940,7 +3983,7 @@ ufoCategory:CreateToggle("Auto Trade Debris", "Trade space rocks at Alien Camp",
     currentSettings.UFOTrade = state
     saveStuff()
     if state and UFOManager and UFOManager.FetchState then
-        pcall(function() UFOManager:FetchState() end)
+        safeCall("UI.UFOTrade.FetchState", UFOManager.FetchState, UFOManager)
     end
 end)
 
@@ -4232,7 +4275,7 @@ task.spawn(function()
             break
         end
         if StealPanelTab.Page and StealPanelTab.Page.Visible and (not Window.MainFrame or Window.MainFrame.Visible) and not State.isStealingActive and renderStealPanel then
-            pcall(renderStealPanel)
+            safeCall("StealPanel.Render", renderStealPanel)
         end
     end
 end)
